@@ -36,10 +36,14 @@ export const mockGraph: GraphData = (() => {
 
   for (let i = 1; i < nodes.length - 1; i += 1) {
     if (i % 2 === 0 || i % 5 === 0) {
+      let targetIndex = (i * 3) % (nodes.length - 1) + 1;
+      if (targetIndex === i) {
+        targetIndex = targetIndex === nodes.length - 1 ? 1 : targetIndex + 1;
+      }
       edges.push({
         id: `e-cross-${i}`,
         source: nodes[i].id,
-        target: nodes[(i * 3) % (nodes.length - 1) + 1].id,
+        target: nodes[targetIndex].id,
         relation_type: relationTypes[(i + 2) % relationTypes.length],
         weight: Math.round(8 + Math.random() * 58),
         properties: { 来源: 'mock' }
