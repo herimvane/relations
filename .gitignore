@@ -9,3 +9,4 @@ __pycache__/
 npm-debug.log*
 github
 github.pub
+AGENTS.md
