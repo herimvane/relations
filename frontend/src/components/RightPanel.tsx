@@ -1,15 +1,28 @@
-import { GraphData, GraphNode } from '../types/graph';
+import { useMemo } from 'react';
+import { GraphData, GraphNode, GraphPath } from '../types/graph';
 import { PathQueryPanel } from './PathQueryPanel';
 
 type Props = {
   selected?: GraphNode;
   hovered?: GraphNode;
   data: GraphData;
+  pathResults: GraphPath[];
+  activePathId?: string;
+  pathQueryLabel?: string;
+  onPickPath: (pathId: string) => void;
 };
 
-export function RightPanel({ selected, hovered, data }: Props) {
+export function RightPanel({ selected, hovered, data, pathResults, activePathId, pathQueryLabel, onPickPath }: Props) {
   const node = hovered ?? selected;
-  const degree = node ? data.edges.filter((edge) => edge.source === node.id || edge.target === node.id).length : 0;
+  const degreeIndex = useMemo(() => {
+    const index = new Map<string, number>();
+    data.edges.forEach((edge) => {
+      index.set(edge.source, (index.get(edge.source) ?? 0) + 1);
+      index.set(edge.target, (index.get(edge.target) ?? 0) + 1);
+    });
+    return index;
+  }, [data.edges]);
+  const degree = node ? degreeIndex.get(node.id) ?? 0 : 0;
 
   return (
     <aside className="right-panel">
@@ -45,7 +58,14 @@ export function RightPanel({ selected, hovered, data }: Props) {
           </>
         )}
       </section>
-      <PathQueryPanel selected={selected} edges={data.edges} />
+      <PathQueryPanel
+        selected={selected}
+        edges={data.edges}
+        paths={pathResults}
+        activePathId={activePathId}
+        queryLabel={pathQueryLabel}
+        onPickPath={onPickPath}
+      />
     </aside>
   );
 }

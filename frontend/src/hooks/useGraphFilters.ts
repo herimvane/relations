@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { GraphData } from '../types/graph';
 
 export function useGraphFilters(data: GraphData) {
@@ -7,6 +7,12 @@ export function useGraphFilters(data: GraphData) {
   const [relationTypes, setRelationTypes] = useState<string[]>([]);
   const [nodeTypes, setNodeTypes] = useState<string[]>([]);
   const [minWeight, setMinWeight] = useState(0);
+
+  const resetFilters = useCallback(() => {
+    setRelationTypes([]);
+    setNodeTypes([]);
+    setMinWeight(0);
+  }, []);
 
   const activeRelationTypes = relationTypes.length ? relationTypes : allRelationTypes;
   const activeNodeTypes = nodeTypes.length ? nodeTypes : allNodeTypes;
@@ -34,6 +40,7 @@ export function useGraphFilters(data: GraphData) {
     setRelationTypes,
     setNodeTypes,
     setMinWeight,
+    resetFilters,
     filteredData
   };
 }

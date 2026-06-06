@@ -21,6 +21,18 @@ export type GraphData = {
   edges: GraphEdge[];
 };
 
+export type GraphPath = {
+  id: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  score: number;
+};
+
+export type GraphViewCommand = {
+  type: 'zoom-in' | 'zoom-out' | 'fit';
+  nonce: number;
+};
+
 export type NodePosition = GraphNode & {
   x: number;
   y: number;

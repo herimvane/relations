@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 from typing import Any
 
 import pandas as pd
@@ -16,6 +17,30 @@ def _clean(value: Any, default: Any = None) -> Any:
     return value
 
 
+def _parse_properties(value: Any) -> dict[str, Any]:
+    value = _clean(value, "")
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {"properties": value}
+    return parsed if isinstance(parsed, dict) else {"properties": parsed}
+
+
+def _row_properties(row: Any, columns: Any, known_columns: set[str]) -> dict[str, Any]:
+    props = _parse_properties(row.get("properties", ""))
+    for key in columns:
+        if key in known_columns or key == "properties":
+            continue
+        value = _clean(row[key], "")
+        if value != "":
+            props[key] = value
+    return props
+
+
 def parse_excel(content: bytes) -> GraphData:
     workbook = pd.ExcelFile(BytesIO(content))
     sheet_names = {name.lower(): name for name in workbook.sheet_names}
@@ -30,7 +55,7 @@ def parse_excel(content: bytes) -> GraphData:
         node_id = str(_clean(row.get("id"), "")).strip()
         if not node_id:
             continue
-        props = {key: _clean(row[key]) for key in nodes_df.columns if key not in KNOWN_NODE_COLUMNS and _clean(row[key], "") != ""}
+        props = _row_properties(row, nodes_df.columns, KNOWN_NODE_COLUMNS)
         nodes.append(
             GraphNode(
                 id=node_id,
@@ -48,7 +73,7 @@ def parse_excel(content: bytes) -> GraphData:
         target = str(_clean(row.get("target"), "")).strip()
         if not source or not target:
             continue
-        props = {key: _clean(row[key]) for key in edges_df.columns if key not in KNOWN_EDGE_COLUMNS and _clean(row[key], "") != ""}
+        props = _row_properties(row, edges_df.columns, KNOWN_EDGE_COLUMNS)
         edges.append(
             GraphEdge(
                 id=str(_clean(row.get("id"), f"e-{index}")),

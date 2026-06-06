@@ -3,7 +3,7 @@ from io import BytesIO
 import pandas as pd
 
 from app.models.graph import GraphData, GraphEdge, GraphNode
-from app.services.excel_parser import KNOWN_EDGE_COLUMNS, KNOWN_NODE_COLUMNS
+from app.services.excel_parser import KNOWN_EDGE_COLUMNS, KNOWN_NODE_COLUMNS, _row_properties
 
 
 def parse_csv(nodes_content: bytes | None, edges_content: bytes | None) -> GraphData:
@@ -16,7 +16,7 @@ def parse_csv(nodes_content: bytes | None, edges_content: bytes | None) -> Graph
             node_id = str(row.get("id", "")).strip()
             if not node_id:
                 continue
-            props = {key: row[key] for key in nodes_df.columns if key not in KNOWN_NODE_COLUMNS and row[key] != ""}
+            props = _row_properties(row, nodes_df.columns, KNOWN_NODE_COLUMNS)
             nodes.append(
                 GraphNode(
                     id=node_id,
@@ -35,7 +35,7 @@ def parse_csv(nodes_content: bytes | None, edges_content: bytes | None) -> Graph
             target = str(row.get("target", "")).strip()
             if not source or not target:
                 continue
-            props = {key: row[key] for key in edges_df.columns if key not in KNOWN_EDGE_COLUMNS and row[key] != ""}
+            props = _row_properties(row, edges_df.columns, KNOWN_EDGE_COLUMNS)
             edges.append(
                 GraphEdge(
                     id=str(row.get("id", f"e-{index}")),

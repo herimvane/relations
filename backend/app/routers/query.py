@@ -17,7 +17,7 @@ def graph_filter(request: GraphFilterRequest) -> GraphData:
 
 @router.post("/path", response_model=GraphData)
 def graph_path(request: PathQueryRequest) -> GraphData:
-    return find_path(request.graph or graph_store.get(), request.source, request.target, request.max_depth)
+    return find_path(request.graph or graph_store.get(), request.source, request.target, request.max_depth, request.max_paths)
 
 
 @router.post("/extract-table", response_model=GraphData)

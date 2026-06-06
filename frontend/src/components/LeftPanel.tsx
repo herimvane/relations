@@ -1,9 +1,12 @@
 import { DataSourcePanel } from './DataSourcePanel';
 import { FilterPanel } from './FilterPanel';
+import { TableExtractPanel } from './TableExtractPanel';
 import { GraphData } from '../types/graph';
 
 type Props = {
   source: string;
+  status: string;
+  loading: boolean;
   error?: string;
   allRelationTypes: string[];
   activeRelationTypes: string[];
@@ -13,12 +16,15 @@ type Props = {
   onRelationTypesChange: (values: string[]) => void;
   onNodeTypesChange: (values: string[]) => void;
   onMinWeightChange: (value: number) => void;
+  onLoadMock: () => void;
   onLoadGraph: (graph: GraphData, source: string) => void;
   onError: (message?: string) => void;
 };
 
 export function LeftPanel({
   source,
+  status,
+  loading,
   error,
   allRelationTypes,
   activeRelationTypes,
@@ -28,12 +34,22 @@ export function LeftPanel({
   onRelationTypesChange,
   onNodeTypesChange,
   onMinWeightChange,
+  onLoadMock,
   onLoadGraph,
   onError
 }: Props) {
   return (
     <aside className="left-panel">
-      <DataSourcePanel source={source} error={error} onLoadGraph={onLoadGraph} onError={onError} />
+      <DataSourcePanel
+        source={source}
+        status={status}
+        loading={loading}
+        error={error}
+        onLoadMock={onLoadMock}
+        onLoadGraph={onLoadGraph}
+        onError={onError}
+      />
+      <TableExtractPanel onLoadGraph={onLoadGraph} onError={onError} />
       <FilterPanel title="节点类型" values={allNodeTypes} active={activeNodeTypes} onChange={onNodeTypesChange} />
       <FilterPanel title="关系类型" values={allRelationTypes} active={activeRelationTypes} onChange={onRelationTypesChange} />
       <section className="panel-section">

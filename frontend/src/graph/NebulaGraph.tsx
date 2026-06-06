@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
-import { GraphData, GraphNode, NodePosition } from '../types/graph';
+import { GraphData, GraphNode, GraphPath, GraphViewCommand, NodePosition } from '../types/graph';
 import { createForceLayout } from './createForceLayout';
 import { colorForGroup, colorForRelation } from './graphTheme';
 import { edgeTouches, neighborIds } from './graphInteractions';
@@ -9,6 +9,8 @@ type Props = {
   data: GraphData;
   selectedNodeId?: string;
   focusedNodeId?: string;
+  highlightedPath?: GraphPath;
+  viewCommand?: GraphViewCommand;
   relationTypes: string[];
   minWeight: number;
   onSelectNode: (node: GraphNode) => void;
@@ -33,8 +35,21 @@ type FocusTarget = {
   id: string;
   center: THREE.Vector3;
   cameraZ: number;
+  rotation: THREE.Euler;
   active: boolean;
 };
+
+const DEFAULT_ROOT_ROTATION = new THREE.Euler(-0.32, 0.38, -0.04);
+const LARGE_GRAPH_NODE_THRESHOLD = 2500;
+const LARGE_GRAPH_EDGE_LIMIT = 1800;
+const LARGE_GRAPH_FOCUS_EDGE_LIMIT = 120;
+const LARGE_GRAPH_ANIMATED_EDGE_LIMIT = 72;
+const LARGE_GRAPH_FOCUS_ANIMATED_EDGE_LIMIT = 24;
+const MIN_CAMERA_Z = 240;
+const MAX_CAMERA_Z = 2750;
+const CAMERA_Y_OFFSET = 24;
+const ZOOM_IN_FACTOR = 0.84;
+const ZOOM_OUT_FACTOR = 1.18;
 
 function makeGlowTexture() {
   const canvas = document.createElement('canvas');
@@ -167,14 +182,53 @@ function vecFromNode(node: NodePosition) {
   return new THREE.Vector3(node.x, node.y, node.z);
 }
 
-function midpointCurve(source: NodePosition, target: NodePosition, lift = 1) {
+function hashString(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function hashUnit(value: string) {
+  return hashString(value) / 4294967295;
+}
+
+function graphEdgeKey(edge: { id?: string; source: string; target: string; relation_type: string }) {
+  return edge.id ?? `${edge.source}-${edge.target}-${edge.relation_type}`;
+}
+
+function midpointCurve(
+  source: NodePosition,
+  target: NodePosition,
+  options: { key: string; weight?: number; active?: boolean; lift?: number }
+) {
   const start = vecFromNode(source);
   const end = vecFromNode(target);
   const mid = start.clone().lerp(end, 0.5);
+  const direction = end.clone().sub(start);
   const distance = start.distanceTo(end);
-  mid.z += 46 * lift + distance * 0.08;
-  mid.x += Math.sin((source.x + target.y) * 0.01) * 18;
-  mid.y += Math.cos((source.y - target.x) * 0.01) * 18;
+
+  const seed = `${options.key}-${source.id}-${target.id}`;
+  const bendSign = hashUnit(`${seed}-bend`) > 0.5 ? 1 : -1;
+  const depthSign = hashUnit(`${seed}-depth-sign`) > 0.46 ? 1 : -1;
+  const distanceFactor = THREE.MathUtils.clamp(distance / 430, 0.36, 1.34);
+  const weightFactor = THREE.MathUtils.clamp(1.15 - (options.weight ?? 30) / 180, 0.62, 1.08);
+  const focusFactor = options.active ? 0.72 : 1;
+  const lift = options.lift ?? 1;
+
+  const planarNormal = new THREE.Vector3(-direction.y, direction.x, 0);
+  if (planarNormal.lengthSq() < 0.0001) {
+    planarNormal.set(1, 0, 0);
+  }
+  planarNormal.normalize();
+
+  const bendAmount = (24 + distance * 0.15) * distanceFactor * weightFactor * focusFactor;
+  const depthAmount = (28 + distance * 0.055) * lift * (0.74 + hashUnit(`${seed}-depth`) * 0.52);
+  mid.add(planarNormal.multiplyScalar(bendAmount * bendSign));
+  mid.z += depthAmount * depthSign;
+
   return new THREE.CatmullRomCurve3([start, mid, end]);
 }
 
@@ -185,7 +239,9 @@ function createFitView(
   fov: number,
   scale: number,
   padding = 1.4,
-  minFrame = 460
+  minFrame = 460,
+  minCameraZ = 320,
+  maxCameraZ = MAX_CAMERA_Z
 ): FitView {
   if (nodes.length === 0) {
     return { center: new THREE.Vector3(), cameraZ: 720 };
@@ -201,22 +257,106 @@ function createFitView(
   const depthAllowance = Math.max(0, size.z * 0.42);
   return {
     center,
-    cameraZ: THREE.MathUtils.clamp(distance + depthAllowance, 320, 1850)
+    cameraZ: THREE.MathUtils.clamp(distance + depthAllowance, minCameraZ, maxCameraZ)
   };
 }
 
 function overviewPadding(nodeCount: number) {
-  return THREE.MathUtils.clamp(0.64 + nodeCount / 700, 0.74, 1.08);
+  return THREE.MathUtils.clamp(1.72 + nodeCount / 650, 1.82, 2.24);
 }
 
 function focusPadding(nodeCount: number) {
-  return THREE.MathUtils.clamp(0.94 + nodeCount / 420, 1.04, 1.42);
+  return THREE.MathUtils.clamp(0.96 + nodeCount / 520, 1.02, 1.36);
+}
+
+type FitChoice = FitView & {
+  rotation: THREE.Euler;
+};
+
+function rotationCandidates(currentRotation: THREE.Euler) {
+  const baseY = currentRotation.y;
+  const candidates: THREE.Euler[] = [];
+  const xAngles = [-0.52, -0.42, -0.32, -0.22, -0.12];
+  const yAngles = [
+    baseY - 0.82,
+    baseY - 0.56,
+    baseY - 0.32,
+    baseY - 0.14,
+    baseY,
+    baseY + 0.14,
+    baseY + 0.32,
+    baseY + 0.56,
+    baseY + 0.82,
+    0.42,
+    -0.42
+  ];
+  const zAngles = [-0.06, 0, 0.04];
+
+  xAngles.forEach((x) => {
+    yAngles.forEach((y) => {
+      zAngles.forEach((z) => candidates.push(new THREE.Euler(x, y, z)));
+    });
+  });
+  candidates.push(currentRotation.clone());
+  return candidates;
+}
+
+function fitScore(nodes: NodePosition[], rotation: THREE.Euler, fit: FitView, aspect: number, scale: number) {
+  const points = nodes.map((node) => vecFromNode(node).applyEuler(rotation).multiplyScalar(scale));
+  const box = new THREE.Box3().setFromPoints(points);
+  const size = box.getSize(new THREE.Vector3());
+  const width = Math.max(size.x, 1);
+  const height = Math.max(size.y, 1);
+  const depth = Math.max(size.z, 1);
+  const projectedAspect = Math.max(width / Math.max(aspect, 0.1), height) / Math.max(1, Math.min(width / Math.max(aspect, 0.1), height));
+  const aspectPenalty = Math.abs(Math.log(projectedAspect)) * 90;
+  const depthPenalty = depth * 0.16;
+  return fit.cameraZ + aspectPenalty + depthPenalty;
+}
+
+function chooseBestFitView(
+  nodes: NodePosition[],
+  currentRotation: THREE.Euler,
+  aspect: number,
+  fov: number,
+  scale: number,
+  options: { padding: number; minFrame: number; minCameraZ: number }
+): FitChoice {
+  if (nodes.length === 0) {
+    return { center: new THREE.Vector3(), cameraZ: 720, rotation: currentRotation.clone() };
+  }
+
+  const candidates = nodes.length < 3 ? [currentRotation.clone(), DEFAULT_ROOT_ROTATION.clone()] : rotationCandidates(currentRotation);
+  return candidates.reduce<FitChoice | undefined>((best, rotation) => {
+    const fit = createFitView(nodes, rotation, aspect, fov, scale, options.padding, options.minFrame, options.minCameraZ);
+    const choice = { ...fit, rotation };
+    if (!best) return choice;
+    return fitScore(nodes, rotation, fit, aspect, scale) < fitScore(nodes, best.rotation, best, aspect, scale) ? choice : best;
+  }, undefined)!;
+}
+
+function representativeOverviewNodes(nodes: NodePosition[], edges: GraphData['edges']) {
+  if (nodes.length <= 160) return nodes;
+  const degree = new Map<string, number>();
+  edges.forEach((edge) => {
+    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1);
+    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1);
+  });
+  return [...nodes]
+    .sort((a, b) => {
+      const scoreA = (a.weight ?? 0) * 1.7 + (degree.get(a.id) ?? 0) * 12;
+      const scoreB = (b.weight ?? 0) * 1.7 + (degree.get(b.id) ?? 0) * 12;
+      return scoreB - scoreA;
+    })
+    .slice(0, 160);
 }
 
 export function NebulaGraph({
   data,
   selectedNodeId,
   focusedNodeId,
+  highlightedPath,
+  viewCommand,
   relationTypes,
   minWeight,
   onSelectNode,
@@ -228,6 +368,7 @@ export function NebulaGraph({
   const focusedRef = useRef(focusedNodeId);
   const viewStateRef = useRef<ViewState>();
   const focusTargetRef = useRef<FocusTarget>();
+  const viewCommandRef = useRef(viewCommand);
   const visibleRelations = useMemo(() => new Set(relationTypes), [relationTypes]);
   const layout = useMemo(() => createForceLayout(data), [data]);
 
@@ -235,6 +376,10 @@ export function NebulaGraph({
     selectedRef.current = selectedNodeId;
     focusedRef.current = focusedNodeId;
   }, [selectedNodeId, focusedNodeId]);
+
+  useEffect(() => {
+    viewCommandRef.current = viewCommand;
+  }, [viewCommand]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -245,7 +390,7 @@ export function NebulaGraph({
 
     const cameraFov = 48;
     const camera = new THREE.PerspectiveCamera(cameraFov, mount.clientWidth / mount.clientHeight, 1, 4200);
-    camera.position.set(0, -44, viewStateRef.current?.cameraZ ?? 720);
+    camera.position.set(0, CAMERA_Y_OFFSET, viewStateRef.current?.cameraZ ?? 720);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -256,8 +401,8 @@ export function NebulaGraph({
 
     const root = new THREE.Group();
     root.position.copy(viewStateRef.current?.rootPosition ?? new THREE.Vector3(0, 0, 0));
-    root.rotation.copy(viewStateRef.current?.rootRotation ?? new THREE.Euler(-0.22, 0.28, -0.04));
-    root.scale.setScalar(viewStateRef.current?.rootScale ?? 1.12);
+    root.rotation.copy(viewStateRef.current?.rootRotation ?? DEFAULT_ROOT_ROTATION);
+    root.scale.setScalar(viewStateRef.current?.rootScale ?? 0.88);
     scene.add(root);
 
     if (!viewStateRef.current) {
@@ -268,7 +413,8 @@ export function NebulaGraph({
         cameraFov,
         root.scale.x,
         overviewPadding(layout.length),
-        260
+        360,
+        720
       );
       root.position.set(-initialFit.center.x, -initialFit.center.y, -initialFit.center.z * 0.18);
       camera.position.z = initialFit.cameraZ;
@@ -306,52 +452,113 @@ export function NebulaGraph({
     const starCoreTexture = makeStarCoreTexture();
     const hotCoreTexture = makeHotCoreTexture();
     const dustGeo = new THREE.BufferGeometry();
-    const dustCount = 460;
+    const dustCount = 620;
     const dustPositions = new Float32Array(dustCount * 3);
     for (let i = 0; i < dustCount; i += 1) {
-      const angle = i * 0.42;
-      const radius = 120 + Math.sqrt(i) * 28;
-      dustPositions[i * 3] = Math.cos(angle) * radius + (Math.random() - 0.5) * 100;
-      dustPositions[i * 3 + 1] = Math.sin(angle) * radius * 0.52 + (Math.random() - 0.5) * 80;
-      dustPositions[i * 3 + 2] = ((i * 29) % 360) - 180;
+      const r = 760 + Math.random() * 1320;
+      const t = Math.random() * Math.PI * 2;
+      const p = Math.acos(2 * Math.random() - 1);
+      dustPositions[i * 3] = r * Math.sin(p) * Math.cos(t);
+      dustPositions[i * 3 + 1] = r * Math.sin(p) * Math.sin(t);
+      dustPositions[i * 3 + 2] = r * Math.cos(p) - 420;
     }
     dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
     const dust = new THREE.Points(
       dustGeo,
       new THREE.PointsMaterial({
-        map: glowTexture,
-        color: 0x4f83c8,
-        size: 18,
+        color: 0x60789c,
+        size: 1.15,
         transparent: true,
-        opacity: 0.13,
-        blending: THREE.AdditiveBlending,
+        opacity: 0.24,
         depthWrite: false
       })
     );
-    root.add(dust);
+    scene.add(dust);
 
     const nodeMap = new Map(layout.map((node) => [node.id, node]));
     const activeIds = neighborIds(data, selectedNodeId, 1);
     const hasSelection = Boolean(selectedNodeId);
+    const pathEdgeKeys = new Set(highlightedPath?.edges.map(graphEdgeKey) ?? []);
+    const pathNodeIds = new Set(highlightedPath?.nodes.map((node) => node.id) ?? []);
+    const hasPath = pathEdgeKeys.size > 0;
+    const largeGraph = layout.length > LARGE_GRAPH_NODE_THRESHOLD;
     const nodeMeshes: NodeMesh[] = [];
+    const raycastTargets: THREE.Object3D[] = [];
 
-    if (focusedNodeId) {
+    const filteredEdges = data.edges.filter(
+      (edge) => visibleRelations.has(edge.relation_type) && (edge.weight ?? 0) >= minWeight
+    );
+    const focusEdges =
+      largeGraph && selectedNodeId
+        ? filteredEdges
+            .filter((edge) => edge.source === selectedNodeId || edge.target === selectedNodeId)
+            .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+            .slice(0, LARGE_GRAPH_FOCUS_EDGE_LIMIT)
+        : [];
+    const focusEdgeKeys = new Set(focusEdges.map(graphEdgeKey));
+    const focusDetailIds = new Set<string>(selectedNodeId ? [selectedNodeId] : []);
+    focusEdges.forEach((edge) => {
+      focusDetailIds.add(edge.source);
+      focusDetailIds.add(edge.target);
+    });
+    pathNodeIds.forEach((id) => focusDetailIds.add(id));
+
+    const visibleEdges = largeGraph
+      ? hasSelection
+        ? [
+            ...focusEdges,
+            ...filteredEdges
+              .filter((edge) => !focusEdgeKeys.has(graphEdgeKey(edge)))
+              .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+              .slice(0, Math.max(0, LARGE_GRAPH_EDGE_LIMIT - focusEdges.length))
+          ]
+        : filteredEdges.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0)).slice(0, LARGE_GRAPH_EDGE_LIMIT)
+      : filteredEdges;
+
+    if (hasPath) {
+      const pathNodes = Array.from(pathNodeIds)
+        .map((id) => nodeMap.get(id))
+        .filter((node): node is NodePosition => Boolean(node));
+      const focusFit = chooseBestFitView(
+        pathNodes,
+        root.rotation,
+        camera.aspect,
+        cameraFov,
+        root.scale.x,
+        {
+          padding: Math.max(1.08, focusPadding(pathNodes.length)),
+          minFrame: 430,
+          minCameraZ: 520
+        }
+      );
+      focusTargetRef.current = {
+        id: `path-${highlightedPath?.id}`,
+        center: focusFit.center,
+        cameraZ: focusFit.cameraZ,
+        rotation: focusFit.rotation,
+        active: true
+      };
+    } else if (focusedNodeId) {
       const focusNodes = Array.from(activeIds)
         .map((id) => nodeMap.get(id))
         .filter((node): node is NodePosition => Boolean(node));
-      const focusFit = createFitView(
+      const focusFit = chooseBestFitView(
         focusNodes,
         root.rotation,
         camera.aspect,
         cameraFov,
         root.scale.x,
-        focusPadding(focusNodes.length),
-        260
+        {
+          padding: focusPadding(focusNodes.length),
+          minFrame: 480,
+          minCameraZ: 560
+        }
       );
       focusTargetRef.current = {
         id: focusedNodeId,
         center: focusFit.center,
         cameraZ: focusFit.cameraZ,
+        rotation: focusFit.rotation,
         active: true
       };
     } else {
@@ -363,9 +570,42 @@ export function NebulaGraph({
     const nodeGroup = new THREE.Group();
     root.add(edgeGroup, particleGroup, nodeGroup);
 
-    data.edges
-      .filter((edge) => visibleRelations.has(edge.relation_type) && (edge.weight ?? 0) >= minWeight)
-      .forEach((edge) => {
+    const largeActiveLinePositions: number[] = [];
+    const largeActiveLineColors: number[] = [];
+    const largeMutedLinePositions: number[] = [];
+    const largeMutedLineColors: number[] = [];
+
+    const appendLargeCurveSegments = (curve: THREE.CatmullRomCurve3, color: THREE.Color, isActive: boolean) => {
+      const points = curve.getPoints(16);
+      const positions = isActive ? largeActiveLinePositions : largeMutedLinePositions;
+      const colors = isActive ? largeActiveLineColors : largeMutedLineColors;
+      for (let index = 0; index < points.length - 1; index += 1) {
+        const start = points[index];
+        const end = points[index + 1];
+        positions.push(start.x, start.y, start.z, end.x, end.y, end.z);
+        colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
+      }
+    };
+
+    const addMergedLines = (positions: number[], colors: number[], opacity: number, renderOrder: number) => {
+      if (positions.length === 0) return;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+      const material = new THREE.LineBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      });
+      const lines = new THREE.LineSegments(geometry, material);
+      lines.renderOrder = renderOrder;
+      edgeGroup.add(lines);
+    };
+
+    let animatedEdgeCount = 0;
+    visibleEdges.forEach((edge) => {
         const source = nodeMap.get(edge.source);
         const target = nodeMap.get(edge.target);
         if (!source || !target) {
@@ -373,34 +613,53 @@ export function NebulaGraph({
           return;
         }
         const color = new THREE.Color(colorForRelation(edge.relation_type));
-        const isActive = !hasSelection || edgeTouches(edge, activeIds);
+        const key = graphEdgeKey(edge);
+        const isPathEdge = pathEdgeKeys.has(key);
+        const lineColor = isPathEdge ? new THREE.Color(0xa7f3ff) : color;
+        const isActive = hasPath
+          ? isPathEdge
+          : largeGraph && hasSelection
+            ? focusEdgeKeys.has(key)
+            : !hasSelection || edgeTouches(edge, activeIds);
         const material = new THREE.LineBasicMaterial({
-          color,
+          color: lineColor,
           transparent: true,
-          opacity: hasSelection ? (isActive ? 0.5 : 0.06) : 0.2,
+          opacity: hasPath ? (isActive ? 0.68 : 0.035) : hasSelection ? (isActive ? 0.5 : 0.06) : 0.2,
           blending: THREE.AdditiveBlending,
           depthWrite: false
         });
-        const curve = midpointCurve(source, target, isActive ? 1.2 : 0.75);
-        const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(42));
-        const line = new THREE.Line(geometry, material);
-        line.renderOrder = isActive ? 2 : 1;
-        edgeGroup.add(line);
+        const curve = midpointCurve(source, target, {
+          key,
+          weight: edge.weight,
+          active: isActive,
+          lift: isActive ? 0.92 : 1.08
+        });
+        if (largeGraph) {
+          appendLargeCurveSegments(curve, lineColor, isActive);
+        } else {
+          const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(48));
+          const line = new THREE.Line(geometry, material);
+          line.renderOrder = isActive ? 2 : 1;
+          edgeGroup.add(line);
+        }
 
-        const shouldAnimate = isActive || (!hasSelection && (edge.weight ?? 0) >= 62);
+        const animationLimit = hasPath ? 36 : hasSelection ? LARGE_GRAPH_FOCUS_ANIMATED_EDGE_LIMIT : LARGE_GRAPH_ANIMATED_EDGE_LIMIT;
+        const shouldAnimate =
+          (isActive || (!hasSelection && !hasPath && (edge.weight ?? 0) >= 78)) && animatedEdgeCount < animationLimit;
         if (shouldAnimate) {
+          animatedEdgeCount += 1;
           const progress = Math.random();
           const speed = 0.0022 + (edge.weight ?? 20) / 78000;
           const particleMaterial = new THREE.SpriteMaterial({
             map: glowTexture,
             color,
             transparent: true,
-            opacity: hasSelection ? (isActive ? 0.68 : 0.18) : 0.42,
+            opacity: hasPath ? (isActive ? 0.74 : 0.1) : hasSelection ? (isActive ? 0.68 : 0.18) : 0.42,
             blending: THREE.AdditiveBlending,
             depthWrite: false
           });
           const particle = new THREE.Sprite(particleMaterial);
-          particle.scale.set(isActive ? 7.2 : 5.2, isActive ? 7.2 : 5.2, 1);
+          particle.scale.set(isActive ? 6.2 : 4.6, isActive ? 6.2 : 4.6, 1);
           particle.renderOrder = isActive ? 5 : 4;
           particle.userData = {
             curve,
@@ -415,12 +674,12 @@ export function NebulaGraph({
                 map: glowTexture,
                 color,
                 transparent: true,
-                opacity: (isActive ? 0.14 : 0.055) / trailIndex,
+                opacity: (isActive ? 0.11 : 0.045) / trailIndex,
                 blending: THREE.AdditiveBlending,
                 depthWrite: false
               })
             );
-            const trailSize = (isActive ? 5.2 : 3.8) / Math.sqrt(trailIndex);
+            const trailSize = (isActive ? 4.4 : 3.1) / Math.sqrt(trailIndex);
             trail.scale.set(trailSize, trailSize, 1);
             trail.renderOrder = isActive ? 4 : 3;
             trail.userData = {
@@ -434,13 +693,59 @@ export function NebulaGraph({
         }
       });
 
+    if (largeGraph) {
+      addMergedLines(largeMutedLinePositions, largeMutedLineColors, hasPath ? 0.025 : hasSelection ? 0.035 : 0.12, 1);
+      addMergedLines(largeActiveLinePositions, largeActiveLineColors, hasPath ? 0.62 : hasSelection ? 0.48 : 0.2, 2);
+    }
+
+    if (largeGraph) {
+      const pointGeometry = new THREE.BufferGeometry();
+      const pointPositions = new Float32Array(layout.length * 3);
+      const pointColors = new Float32Array(layout.length * 3);
+      layout.forEach((node, index) => {
+        const color = new THREE.Color(colorForGroup(node.group));
+        pointPositions[index * 3] = node.x;
+        pointPositions[index * 3 + 1] = node.y;
+        pointPositions[index * 3 + 2] = node.z;
+        pointColors[index * 3] = color.r;
+        pointColors[index * 3 + 1] = color.g;
+        pointColors[index * 3 + 2] = color.b;
+      });
+      pointGeometry.setAttribute('position', new THREE.BufferAttribute(pointPositions, 3));
+      pointGeometry.setAttribute('color', new THREE.BufferAttribute(pointColors, 3));
+      const nodePoints = new THREE.Points(
+        pointGeometry,
+        new THREE.PointsMaterial({
+          vertexColors: true,
+          size: hasPath || hasSelection ? 3.2 : 5.6,
+          transparent: true,
+          opacity: hasPath ? 0.13 : hasSelection ? 0.2 : 0.76,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        })
+      );
+      nodePoints.userData.nodes = layout;
+      nodePoints.renderOrder = 5;
+      nodeGroup.add(nodePoints);
+      raycastTargets.push(nodePoints);
+    }
+
     layout.forEach((node) => {
-      const color = new THREE.Color(node.id === 'n-0' ? '#ffffff' : colorForGroup(node.group));
-      const radius = node.id === 'n-0' ? 18 : Math.max(7.4, Math.min(16.5, 6.4 + (node.weight ?? 20) / 8.5));
-      const isActive = !hasSelection || activeIds.has(node.id);
-      const starburstOpacity = isActive ? (node.id === 'n-0' ? 0.95 : 0.72) : 0.1;
-      const coreOpacity = isActive ? (node.id === 'n-0' ? 0.96 : 0.84) : 0.18;
-      const hotCoreOpacity = isActive ? (node.id === 'n-0' ? 0.98 : 0.9) : 0.22;
+      const shouldRenderDetailedNode =
+        !largeGraph || (hasPath && pathNodeIds.has(node.id)) || (hasSelection && focusDetailIds.has(node.id)) || (!hasSelection && (node.weight ?? 0) >= 82);
+      if (!shouldRenderDetailedNode) return;
+
+      const color = new THREE.Color(colorForGroup(node.group));
+      const isActive = hasPath
+        ? pathNodeIds.has(node.id)
+        : largeGraph && hasSelection
+          ? focusDetailIds.has(node.id)
+          : !hasSelection || activeIds.has(node.id);
+      const baseRadius = Math.max(6.4, Math.min(15.2, 5.7 + (node.weight ?? 20) / 9.5));
+      const radius = baseRadius * (isActive && (hasSelection || hasPath) ? 1.18 : 1);
+      const starburstOpacity = isActive ? 0.68 : 0.1;
+      const coreOpacity = isActive ? 0.78 : 0.18;
+      const hotCoreOpacity = isActive ? 0.84 : 0.22;
       const material = new THREE.MeshBasicMaterial({
         color,
         transparent: true,
@@ -453,11 +758,12 @@ export function NebulaGraph({
       mesh.renderOrder = 8;
       nodeGroup.add(mesh);
       nodeMeshes.push(mesh);
+      raycastTargets.push(mesh);
 
       const starburst = new THREE.Sprite(
         new THREE.SpriteMaterial({
           map: starburstTexture,
-          color: node.id === 'n-0' ? 0xffffff : color,
+          color,
           transparent: true,
           opacity: starburstOpacity,
           blending: THREE.AdditiveBlending,
@@ -465,7 +771,7 @@ export function NebulaGraph({
           depthWrite: false
         })
       );
-      const burstScale = node.id === 'n-0' ? 78 : radius * 3.7;
+      const burstScale = radius * 3.3;
       starburst.scale.set(burstScale, burstScale, 1);
       starburst.position.copy(mesh.position);
       starburst.renderOrder = 6;
@@ -479,7 +785,7 @@ export function NebulaGraph({
       const core = new THREE.Sprite(
         new THREE.SpriteMaterial({
           map: starCoreTexture,
-          color: node.id === 'n-0' ? 0xffffff : color,
+          color,
           transparent: true,
           opacity: coreOpacity,
           blending: THREE.AdditiveBlending,
@@ -504,14 +810,17 @@ export function NebulaGraph({
           depthWrite: false
         })
       );
-      const hotCoreScale = node.id === 'n-0' ? radius * 1.42 : radius * 1.28;
+      const hotCoreScale = radius * 1.22;
       hotCore.scale.set(hotCoreScale, hotCoreScale, 1);
       hotCore.position.copy(mesh.position);
       hotCore.renderOrder = 8;
       hotCore.userData = { baseScale: hotCoreScale, phase: Math.random() * Math.PI * 2 };
       nodeGroup.add(hotCore);
 
-      if (hasSelection && activeIds.has(node.id)) {
+      const shouldShowLabel = hasPath
+        ? pathNodeIds.has(node.id)
+        : hasSelection && (largeGraph ? focusDetailIds.has(node.id) : activeIds.has(node.id));
+      if (shouldShowLabel) {
         const labelTexture = makeNodeLabelTexture(node.name);
         const label = new THREE.Sprite(
           new THREE.SpriteMaterial({
@@ -531,12 +840,18 @@ export function NebulaGraph({
     });
 
     const raycaster = new THREE.Raycaster();
+    raycaster.params.Points = { threshold: largeGraph ? 10 : 4 };
     const pointer = new THREE.Vector2();
-    let hovered: NodeMesh | undefined;
+    let hovered: NodePosition | undefined;
     let isDragging = false;
     let dragDistance = 0;
     let lastX = 0;
     let lastY = 0;
+    let cameraTargetZ = camera.position.z;
+
+    if (focusTargetRef.current?.active) {
+      cameraTargetZ = focusTargetRef.current.cameraZ;
+    }
 
     const setPointer = (event: PointerEvent) => {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -557,15 +872,22 @@ export function NebulaGraph({
       }
       setPointer(event);
       raycaster.setFromCamera(pointer, camera);
-      const hit = raycaster.intersectObjects(nodeMeshes, false)[0]?.object as NodeMesh | undefined;
-      if (hit !== hovered) {
-        hovered = hit;
-        renderer.domElement.style.cursor = hit ? 'pointer' : 'grab';
-        onHoverNode(hit?.userData.node);
+      const hit = raycaster.intersectObjects(raycastTargets, false)[0];
+      const hitNode =
+        hit?.object instanceof THREE.Points
+          ? ((hit.object.userData.nodes as NodePosition[] | undefined)?.[hit.index ?? -1])
+          : ((hit?.object as NodeMesh | undefined)?.userData.node);
+      if (hitNode?.id !== hovered?.id) {
+        hovered = hitNode;
+        renderer.domElement.style.cursor = hitNode ? 'pointer' : 'grab';
+        onHoverNode(hitNode);
       }
     };
 
     const onPointerDown = (event: PointerEvent) => {
+      if (focusTargetRef.current) {
+        focusTargetRef.current.active = false;
+      }
       isDragging = true;
       dragDistance = 0;
       lastX = event.clientX;
@@ -575,14 +897,14 @@ export function NebulaGraph({
     const onPointerUp = (event: PointerEvent) => {
       isDragging = false;
       renderer.domElement.releasePointerCapture(event.pointerId);
-      if (hovered && dragDistance < 8) onSelectNode(hovered.userData.node);
+      if (hovered && dragDistance < 8) onSelectNode(hovered);
     };
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
       if (focusTargetRef.current) {
         focusTargetRef.current.active = false;
       }
-      camera.position.z = THREE.MathUtils.clamp(camera.position.z + event.deltaY * 0.62, 260, 2200);
+      cameraTargetZ = THREE.MathUtils.clamp(cameraTargetZ + event.deltaY * 0.62, MIN_CAMERA_Z, MAX_CAMERA_Z);
     };
     const onResize = () => {
       camera.aspect = mount.clientWidth / mount.clientHeight;
@@ -597,9 +919,58 @@ export function NebulaGraph({
     window.addEventListener('resize', onResize);
 
     let raf = 0;
+    let handledCommandNonce = viewCommandRef.current?.nonce;
     const clock = new THREE.Clock();
+    const fitCurrentView = () => {
+      const fitNodes = hasPath
+        ? Array.from(pathNodeIds)
+            .map((id) => nodeMap.get(id))
+            .filter((node): node is NodePosition => Boolean(node))
+        : representativeOverviewNodes(layout, visibleEdges);
+      const fit = hasPath
+        ? chooseBestFitView(fitNodes, root.rotation, camera.aspect, cameraFov, root.scale.x, {
+            padding: Math.max(1.08, focusPadding(fitNodes.length)),
+            minFrame: 430,
+            minCameraZ: 520
+          })
+        : {
+            ...createFitView(
+              fitNodes,
+              DEFAULT_ROOT_ROTATION,
+              camera.aspect,
+              cameraFov,
+              root.scale.x,
+              1.34,
+              460,
+              620,
+              1680
+            ),
+            rotation: DEFAULT_ROOT_ROTATION.clone()
+          };
+      focusTargetRef.current = {
+        id: `manual-fit-${handledCommandNonce ?? 0}`,
+        center: fit.center,
+        cameraZ: fit.cameraZ,
+        rotation: fit.rotation,
+        active: true
+      };
+      cameraTargetZ = fit.cameraZ;
+    };
     const animate = () => {
       const elapsed = clock.getElapsedTime();
+      const command = viewCommandRef.current;
+      if (command && command.nonce !== handledCommandNonce) {
+        handledCommandNonce = command.nonce;
+        if (command.type === 'zoom-in') {
+          if (focusTargetRef.current) focusTargetRef.current.active = false;
+          cameraTargetZ = THREE.MathUtils.clamp(cameraTargetZ * ZOOM_IN_FACTOR, MIN_CAMERA_Z, MAX_CAMERA_Z);
+        } else if (command.type === 'zoom-out') {
+          if (focusTargetRef.current) focusTargetRef.current.active = false;
+          cameraTargetZ = THREE.MathUtils.clamp(cameraTargetZ * ZOOM_OUT_FACTOR, MIN_CAMERA_Z, MAX_CAMERA_Z);
+        } else {
+          fitCurrentView();
+        }
+      }
       stars.rotation.z += 0.00008;
       point.intensity = 2.2 + Math.sin(elapsed * 1.5) * 0.25;
       particleGroup.children.forEach((sprite) => {
@@ -621,17 +992,26 @@ export function NebulaGraph({
       });
       if (focusTargetRef.current?.active) {
         const target = focusTargetRef.current;
-        root.position.x += (-target.center.x - root.position.x) * 0.05;
-        root.position.y += (-target.center.y - root.position.y) * 0.05;
-        root.position.z += (-target.center.z * 0.22 - root.position.z) * 0.026;
-        camera.position.z += (target.cameraZ - camera.position.z) * 0.04;
+        root.position.x += (-target.center.x - root.position.x) * 0.026;
+        root.position.y += (-target.center.y - root.position.y) * 0.026;
+        root.position.z += (-target.center.z * 0.18 - root.position.z) * 0.018;
+        root.rotation.x += (target.rotation.x - root.rotation.x) * 0.032;
+        root.rotation.y += (target.rotation.y - root.rotation.y) * 0.032;
+        root.rotation.z += (target.rotation.z - root.rotation.z) * 0.032;
+        camera.position.z += (target.cameraZ - camera.position.z) * 0.022;
+        cameraTargetZ = target.cameraZ;
         if (
           Math.abs(root.position.x + target.center.x) < 0.8 &&
           Math.abs(root.position.y + target.center.y) < 0.8 &&
-          Math.abs(camera.position.z - target.cameraZ) < 1.2
+          Math.abs(camera.position.z - target.cameraZ) < 1.2 &&
+          Math.abs(root.rotation.x - target.rotation.x) < 0.006 &&
+          Math.abs(root.rotation.y - target.rotation.y) < 0.006
         ) {
           target.active = false;
+          cameraTargetZ = target.cameraZ;
         }
+      } else {
+        camera.position.z += (cameraTargetZ - camera.position.z) * 0.12;
       }
       renderer.render(scene, camera);
       raf = requestAnimationFrame(animate);
@@ -657,6 +1037,7 @@ export function NebulaGraph({
   }, [
     data,
     focusedNodeId,
+    highlightedPath,
     layout,
     minWeight,
     onCanvasReady,

@@ -16,6 +16,7 @@ class PathQueryRequest(BaseModel):
     source: str
     target: str
     max_depth: int = 4
+    max_paths: int = 12
     graph: GraphData | None = None
 
 

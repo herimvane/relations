@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { GraphEdge } from '../types/graph';
 
 type Props = {
@@ -5,7 +6,7 @@ type Props = {
 };
 
 export function BottomRankPanel({ edges }: Props) {
-  const topEdges = [...edges].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0)).slice(0, 7);
+  const topEdges = useMemo(() => [...edges].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0)).slice(0, 7), [edges]);
   return (
     <footer className="bottom-rank">
       <div className="rank-title">Top 关系榜单</div>

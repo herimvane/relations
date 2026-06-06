@@ -2,6 +2,16 @@ import { GraphData } from '../types/graph';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
 
+async function apiError(response: Response, fallback: string) {
+  try {
+    const body = await response.json();
+    const detail = typeof body?.detail === 'string' ? body.detail : undefined;
+    return new Error(detail ? `${fallback}: ${detail}` : `${fallback}: ${response.status}`);
+  } catch {
+    return new Error(`${fallback}: ${response.status}`);
+  }
+}
+
 export type PostgresConfig = {
   host: string;
   port: number;
@@ -25,7 +35,7 @@ export async function testPostgres(config: PostgresConfig) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config)
   });
-  if (!response.ok) throw new Error(`PostgreSQL test failed: ${response.status}`);
+  if (!response.ok) throw await apiError(response, 'PostgreSQL test failed');
   return response.json();
 }
 
@@ -35,6 +45,6 @@ export async function loadPostgresGraph(payload: PostgresGraphRequest): Promise<
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
-  if (!response.ok) throw new Error(`PostgreSQL graph failed: ${response.status}`);
+  if (!response.ok) throw await apiError(response, 'PostgreSQL graph failed');
   return response.json();
 }

@@ -7,12 +7,15 @@ type Props = {
   value: string;
   onChange: (value: string) => void;
   onPick: (node: GraphNode) => void;
+  onSubmit: () => void;
 };
 
-export function SearchBox({ nodes, value, onChange, onPick }: Props) {
+export function SearchBox({ nodes, value, onChange, onPick, onSubmit }: Props) {
   const [isOpen, setIsOpen] = useState(false);
-  const matches = isOpen && value.trim()
-    ? nodes.filter((node) => node.name.toLowerCase().includes(value.toLowerCase()) || node.id.includes(value)).slice(0, 6)
+  const isPathQuery = /(::|->|到)/.test(value);
+  const normalizedValue = value.toLowerCase();
+  const matches = isOpen && value.trim() && !isPathQuery
+    ? nodes.filter((node) => node.name.toLowerCase().includes(normalizedValue) || node.id.toLowerCase().includes(normalizedValue)).slice(0, 6)
     : [];
 
   return (
@@ -26,7 +29,14 @@ export function SearchBox({ nodes, value, onChange, onPick }: Props) {
           setIsOpen(true);
         }}
         onFocus={() => setIsOpen(true)}
-        placeholder="搜索节点、实体、ID"
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            setIsOpen(false);
+            onSubmit();
+          }
+        }}
+        placeholder="搜索节点、实体、ID 或 节点A::节点B"
       />
       {matches.length > 0 && (
         <div className="search-results">
