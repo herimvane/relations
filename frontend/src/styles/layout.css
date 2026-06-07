@@ -4,8 +4,8 @@
   width: 100%;
   height: 100%;
   background:
-    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px);
+    linear-gradient(rgba(255, 255, 255, 0.008) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.006) 1px, transparent 1px);
   background-size: 48px 48px;
 }
 
@@ -17,9 +17,9 @@
   align-items: center;
   gap: 20px;
   padding: 12px 18px;
-  border-bottom: 1px solid rgba(130, 170, 220, 0.08);
-  background: rgba(10, 14, 20, 0.62);
-  backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(10, 15, 25, 0.85);
+  backdrop-filter: blur(20px);
 }
 
 .brand {
@@ -31,10 +31,10 @@
 .brand-mark {
   width: 34px;
   height: 34px;
-  border: 1px solid rgba(150, 210, 255, 0.42);
+  border: 1px solid rgba(255, 232, 214, 0.42);
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(255, 255, 255, 0.95), rgba(80, 190, 245, 0.34) 35%, transparent 70%);
-  box-shadow: 0 0 28px rgba(105, 210, 255, 0.38);
+  background: radial-gradient(circle, rgba(255, 244, 230, 0.95), rgba(255, 122, 122, 0.34) 38%, transparent 72%);
+  box-shadow: 0 0 26px rgba(255, 122, 122, 0.28);
 }
 
 .brand strong,
@@ -154,22 +154,22 @@
 .right-panel {
   min-height: 0;
   overflow: auto;
-  border-color: rgba(130, 170, 220, 0.14);
-  background: rgba(17, 24, 39, 0.66);
-  backdrop-filter: blur(18px);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(10, 15, 25, 0.85);
+  backdrop-filter: blur(20px);
 }
 
 .left-panel {
-  border-right: 1px solid rgba(130, 170, 220, 0.14);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .right-panel {
-  border-left: 1px solid rgba(130, 170, 220, 0.14);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .panel-section {
   padding: 18px;
-  border-bottom: 1px solid rgba(130, 170, 220, 0.11);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .section-title {
@@ -367,12 +367,12 @@
 
 .chip.active {
   color: #eaf7ff;
-  border-color: rgba(110, 231, 249, 0.34);
+  border-color: rgba(255, 213, 79, 0.34);
 }
 
 .range {
   width: 100%;
-  accent-color: #6ee7f9;
+  accent-color: #ffd54f;
 }
 
 .range-value {
@@ -428,11 +428,20 @@
 }
 
 .property-list div {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
   gap: 16px;
+  align-items: start;
   padding: 8px 0;
   border-top: 1px solid rgba(130, 170, 220, 0.1);
+}
+
+.property-list strong {
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .path-list {
@@ -515,10 +524,21 @@
   border: 1px solid rgba(130, 170, 220, 0.13);
   border-radius: 8px;
   background: rgba(13, 21, 34, 0.72);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+
+.rank-item:hover {
+  border-color: rgba(255, 213, 79, 0.34);
+  background: rgba(19, 29, 46, 0.86);
+  transform: translateY(-1px);
 }
 
 .rank-item span {
-  color: #6ee7f9;
+  color: #ffd54f;
 }
 
 .rank-item strong,

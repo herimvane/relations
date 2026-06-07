@@ -40,6 +40,16 @@ function edgeKey(edge: GraphEdge) {
   return edge.id ?? `${edge.source}-${edge.target}-${edge.relation_type}`;
 }
 
+function edgeSignatures(edge: GraphEdge) {
+  const relation = edge.relation_type || '';
+  return [
+    edge.id,
+    `${edge.source}->${edge.target}::${relation}`,
+    `${edge.target}->${edge.source}::${relation}`,
+    [edge.source, edge.target].sort().join('<->') + `::${relation}`
+  ].filter((item): item is string => Boolean(item));
+}
+
 export function searchGraphPaths(
   graph: GraphData,
   source: GraphNode,
@@ -122,7 +132,7 @@ export function mergeGraphWithPath(graph: GraphData, path?: GraphPath): GraphDat
   if (!path) return graph;
 
   const nodeIndex = new Map(graph.nodes.map((node) => [node.id, node]));
-  const edgeIndex = new Set(graph.edges.map(edgeKey));
+  const edgeIndex = new Set(graph.edges.flatMap(edgeSignatures));
   const nodes = [...graph.nodes];
   const edges = [...graph.edges];
 
@@ -133,9 +143,9 @@ export function mergeGraphWithPath(graph: GraphData, path?: GraphPath): GraphDat
     }
   });
   path.edges.forEach((edge) => {
-    const key = edgeKey(edge);
-    if (!edgeIndex.has(key)) {
-      edgeIndex.add(key);
+    const signatures = edgeSignatures(edge);
+    if (!signatures.some((signature) => edgeIndex.has(signature))) {
+      signatures.forEach((signature) => edgeIndex.add(signature));
       edges.push(edge);
     }
   });

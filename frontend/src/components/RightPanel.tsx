@@ -12,6 +12,26 @@ type Props = {
   onPickPath: (pathId: string) => void;
 };
 
+function formatPropertyValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '-';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function displayProperties(properties?: Record<string, unknown>) {
+  if (!properties) return [];
+  const entries = Object.entries(properties);
+  if (entries.length === 1 && entries[0][0] === 'properties' && typeof entries[0][1] === 'object' && entries[0][1] !== null) {
+    if (Array.isArray(entries[0][1])) return entries;
+    return Object.entries(entries[0][1] as Record<string, unknown>);
+  }
+  return entries;
+}
+
 export function RightPanel({ selected, hovered, data, pathResults, activePathId, pathQueryLabel, onPickPath }: Props) {
   const node = hovered ?? selected;
   const degreeIndex = useMemo(() => {
@@ -23,6 +43,7 @@ export function RightPanel({ selected, hovered, data, pathResults, activePathId,
     return index;
   }, [data.edges]);
   const degree = node ? degreeIndex.get(node.id) ?? 0 : 0;
+  const properties = displayProperties(node?.properties);
 
   return (
     <aside className="right-panel">
@@ -45,12 +66,12 @@ export function RightPanel({ selected, hovered, data, pathResults, activePathId,
               <span>度数</span>
               <strong>{degree}</strong>
             </div>
-            {node.properties && (
+            {properties.length > 0 && (
               <div className="property-list">
-                {Object.entries(node.properties).map(([key, value]) => (
+                {properties.map(([key, value]) => (
                   <div key={key}>
                     <span>{key}</span>
-                    <strong>{String(value)}</strong>
+                    <strong title={formatPropertyValue(value)}>{formatPropertyValue(value)}</strong>
                   </div>
                 ))}
               </div>
@@ -60,6 +81,7 @@ export function RightPanel({ selected, hovered, data, pathResults, activePathId,
       </section>
       <PathQueryPanel
         selected={selected}
+        nodes={data.nodes}
         edges={data.edges}
         paths={pathResults}
         activePathId={activePathId}

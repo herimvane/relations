@@ -1,0 +1,34 @@
+按照十万级数据来改造
+
+# 计算重要度
+
+## 节点重要度
+1. PageRank，衡量谁被更多重要节点连接
+2. Betweenness，衡量谁是桥梁
+3. Degree，衡量直接关系数量
+
+NodeImportance = 0.45 × PageRank + 0.35 × Betweenness + 0.20 × Degree，全部归一化： 0~1
+
+## 边的重要度
+EdgeImportance = 0.5 × EdgeBetweenness + 0.3 × Weight + 0.2 × NodeImportanceAverage
+NodeImportanceAverage = (sourceImportance + targetImportance)/2
+
+## 关键路径定义
+关键路径不是最短路径，而是连接两个核心节点的最优路径
+PathScore = ( Σ(NodeImportance) + Σ(EdgeImportance) ) / PathLength
+
+# 百万级数据
+按照百万级数据来设计关系图，不能把数据直接丢给前端。落地要按 “后端存全量、服务端分析、前端只看局部/骨架” 来做。
+
+# 视图类别
+## 分为四个级别
+1. L0 宇宙视图 (Universe)：通过Louvain或Leiden算法社区发现，比如发现社区a,b,c,d。
+2. L1 星系视图 (Galaxy)：点击某个社区后进入这个视图，根据NodeImportance的排序，取top1000，再找连接这些核心节点的关键路径。
+3. L2 骨架视图 (Backbone)：点击某个节点后，根据NodeImportance的排序，取top1000，再找连接这些核心节点的关键路径。
+4. L3 局部视图 (Local)：点击某个节点后，如果返回的节点大于1000，显示1度关系。用户继续往下点，只要返回的几点小于1000，就可以完全显示整个关系。
+
+### 需要在页面增加一个返回按钮，用于返回上一个视图
+
+
+
+

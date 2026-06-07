@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useEffect, useMemo, useRef, useState } from 'react';
 import { GraphData, GraphEdge, GraphNode } from '../types/graph';
+import { rankCoreNodes } from '../graph/coreScore';
 
 type ViewportStats = {
   mode: 'detail' | 'clustered';
@@ -15,6 +16,11 @@ type WorkerResponse = {
   stats: ViewportStats;
 };
 
+type GraphIndexes = {
+  nodeMap: Map<string, GraphNode>;
+  adjacency: Map<string, GraphEdge[]>;
+};
+
 const DEFAULT_STATS: ViewportStats = {
   mode: 'detail',
   sourceNodeCount: 0,
@@ -26,6 +32,29 @@ const DEFAULT_STATS: ViewportStats = {
 
 function opposite(edge: GraphEdge, nodeId: string) {
   return edge.source === nodeId ? edge.target : edge.source;
+}
+
+function createEdgeCollector(initialEdges: GraphEdge[] = []) {
+  const refs = new WeakSet<GraphEdge>();
+  const ids = new Set<string>();
+  const edges: GraphEdge[] = [];
+
+  const add = (edge: GraphEdge) => {
+    if (edge.id) {
+      if (ids.has(edge.id)) return;
+      ids.add(edge.id);
+    } else {
+      if (refs.has(edge)) return;
+      refs.add(edge);
+    }
+    edges.push(edge);
+  };
+
+  initialEdges.forEach(add);
+  return {
+    add,
+    values: () => edges
+  };
 }
 
 function createClusterNode(group: string, type: string, count: number): GraphNode {
@@ -49,7 +78,13 @@ function parseClusterFocusId(id?: string) {
   return { anchorId: first, group: second, type: rest.join(':') };
 }
 
-function buildIndexes(graph: GraphData) {
+const indexCache = new WeakMap<GraphData, GraphIndexes>();
+const overviewCache = new WeakMap<GraphData, Map<string, WorkerResponse>>();
+
+function buildIndexes(graph: GraphData): GraphIndexes {
+  const cached = indexCache.get(graph);
+  if (cached) return cached;
+
   const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
   const adjacency = new Map<string, GraphEdge[]>();
   graph.edges.forEach((edge) => {
@@ -59,30 +94,30 @@ function buildIndexes(graph: GraphData) {
     adjacency.get(edge.source)!.push(edge);
     adjacency.get(edge.target)!.push(edge);
   });
-  return { nodeMap, adjacency };
+  const indexes = { nodeMap, adjacency };
+  indexCache.set(graph, indexes);
+  return indexes;
 }
 
-function pickAnchorNodes(graph: GraphData, adjacency: Map<string, GraphEdge[]>, limit = 8) {
-  return [...graph.nodes]
-    .sort((a, b) => {
-      const scoreA = (a.weight ?? 0) * 1.8 + (adjacency.get(a.id)?.length ?? 0) * 9;
-      const scoreB = (b.weight ?? 0) * 1.8 + (adjacency.get(b.id)?.length ?? 0) * 9;
-      return scoreB - scoreA;
-    })
-    .slice(0, limit);
+function pickAnchorNodes(graph: GraphData, limit = 8) {
+  return rankCoreNodes(graph).map((item) => item.node).slice(0, limit);
 }
 
 function createOverviewViewport(graph: GraphData, anchorLimit = 12, perAnchorLimit = 30): WorkerResponse {
+  const cacheKey = `${anchorLimit}:${perAnchorLimit}`;
+  const cached = overviewCache.get(graph)?.get(cacheKey);
+  if (cached) return cached;
+
   const { nodeMap, adjacency } = buildIndexes(graph);
-  const focusNodes = pickAnchorNodes(graph, adjacency, anchorLimit);
+  const focusNodes = pickAnchorNodes(graph, anchorLimit);
   const detailIds = new Set(focusNodes.map((node) => node.id));
-  const detailEdges = new Map<string, GraphEdge>();
+  const detailEdges = createEdgeCollector();
   const clusterMap = new Map<string, { anchorId: string; group: string; type: string; count: number; weight: number }>();
 
   focusNodes.forEach((anchor) => {
     const incident = [...(adjacency.get(anchor.id) ?? [])].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
     incident.slice(0, perAnchorLimit).forEach((edge) => {
-      detailEdges.set(edge.id ?? `${edge.source}-${edge.target}-${edge.relation_type}`, edge);
+      detailEdges.add(edge);
       detailIds.add(opposite(edge, anchor.id));
     });
     incident.slice(perAnchorLimit).forEach((edge) => {
@@ -113,7 +148,7 @@ function createOverviewViewport(graph: GraphData, anchorLimit = 12, perAnchorLim
   const nodes = [...graph.nodes.filter((node) => detailIds.has(node.id)), ...clusterNodes];
   const edges = [...detailEdges.values(), ...clusterEdges];
 
-  return {
+  const response: WorkerResponse = {
     graph: { nodes, edges },
     stats: {
       mode: 'clustered',
@@ -124,6 +159,10 @@ function createOverviewViewport(graph: GraphData, anchorLimit = 12, perAnchorLim
       hiddenNodeCount: Math.max(0, graph.nodes.length - nodes.length)
     }
   };
+  const graphCache = overviewCache.get(graph) ?? new Map<string, WorkerResponse>();
+  graphCache.set(cacheKey, response);
+  overviewCache.set(graph, graphCache);
+  return response;
 }
 
 function createClusterViewport(graph: GraphData, focusId: string, depth: number): WorkerResponse {
@@ -143,7 +182,7 @@ function createClusterViewport(graph: GraphData, focusId: string, depth: number)
   const visibleMembers = clusterMembers.slice(0, detailLimit);
   const memberIds = new Set(visibleMembers.map((node) => node.id));
   const nodeById = new Map<string, GraphNode>();
-  const edgeById = new Map<string, GraphEdge>();
+  const edgeCollector = createEdgeCollector();
 
   if (anchor) nodeById.set(anchor.id, anchor);
   visibleMembers.forEach((node) => nodeById.set(node.id, node));
@@ -165,11 +204,11 @@ function createClusterViewport(graph: GraphData, focusId: string, depth: number)
     const bothVisible = memberIds.has(edge.source) && memberIds.has(edge.target);
     const connectsVisibleMember = touchesAnchor && (memberIds.has(edge.source) || memberIds.has(edge.target));
     if (!bothVisible && !connectsVisibleMember) return;
-    edgeById.set(edge.id ?? `${edge.source}-${edge.target}-${edge.relation_type}`, edge);
+    edgeCollector.add(edge);
   });
 
   visibleMembers.slice(0, 42).forEach((node) => {
-    edgeById.set(`edge:${focusId}:${node.id}`, {
+    edgeCollector.add({
       id: `edge:${focusId}:${node.id}`,
       source: focusId,
       target: node.id,
@@ -180,7 +219,7 @@ function createClusterViewport(graph: GraphData, focusId: string, depth: number)
   });
 
   if (anchor) {
-    edgeById.set(`edge:${anchor.id}:${focusId}`, {
+    edgeCollector.add({
       id: `edge:${anchor.id}:${focusId}`,
       source: anchor.id,
       target: focusId,
@@ -195,10 +234,10 @@ function createClusterViewport(graph: GraphData, focusId: string, depth: number)
     if (!nodeById.has(node.id)) nodeById.set(node.id, node);
   });
   overview.graph.edges.forEach((edge) => {
-    edgeById.set(edge.id ?? `${edge.source}-${edge.target}-${edge.relation_type}`, edge);
+    edgeCollector.add(edge);
   });
 
-  const result = { nodes: [...nodeById.values()], edges: [...edgeById.values()] };
+  const result = { nodes: [...nodeById.values()], edges: edgeCollector.values() };
   return {
     graph: result,
     stats: {
@@ -271,11 +310,9 @@ function createImmediateViewport(graph: GraphData, focusId: string | undefined, 
   overview.graph.nodes.forEach((node) => nodeById.set(node.id, node));
   clusterNodes.forEach((node) => nodeById.set(node.id, node));
   const nodes = [...nodeById.values()];
-  const uniqueEdges = new Map<string, GraphEdge>();
-  [...overview.graph.edges, ...detailEdges, ...contextEdges, ...clusterEdges].forEach((edge) =>
-    uniqueEdges.set(edge.id ?? `${edge.source}-${edge.target}-${edge.relation_type}`, edge)
-  );
-  const edges = [...uniqueEdges.values()];
+  const edgeCollector = createEdgeCollector();
+  [...overview.graph.edges, ...detailEdges, ...contextEdges, ...clusterEdges].forEach(edgeCollector.add);
+  const edges = edgeCollector.values();
   return {
     graph: { nodes, edges },
     stats: {
@@ -289,13 +326,34 @@ function createImmediateViewport(graph: GraphData, focusId: string | undefined, 
   };
 }
 
+function createFallbackViewport(graph: GraphData): WorkerResponse {
+  if (graph.nodes.length === 0) return { graph: { nodes: [], edges: [] }, stats: DEFAULT_STATS };
+  const nodes = rankCoreNodes(graph).map((item) => item.node).slice(0, 80);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const edges = graph.edges
+    .filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target))
+    .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+    .slice(0, 180);
+  return {
+    graph: { nodes, edges },
+    stats: {
+      mode: 'clustered',
+      sourceNodeCount: graph.nodes.length,
+      sourceEdgeCount: graph.edges.length,
+      visibleNodeCount: nodes.length,
+      visibleEdgeCount: edges.length,
+      hiddenNodeCount: Math.max(0, graph.nodes.length - nodes.length)
+    }
+  };
+}
+
 export function useGraphViewport(graph: GraphData, focusId: string | undefined, depth: number) {
   const [viewport, setViewport] = useState<WorkerResponse>({
-    graph: { nodes: graph.nodes.slice(0, 1), edges: [] },
-    stats: DEFAULT_STATS
+    ...createFallbackViewport(graph)
   });
   const workerRef = useRef<Worker>();
   const requestIdRef = useRef(0);
+  const workerGraphRef = useRef<GraphData>();
 
   useEffect(() => {
     return () => workerRef.current?.terminate();
@@ -304,20 +362,22 @@ export function useGraphViewport(graph: GraphData, focusId: string | undefined, 
   useEffect(() => {
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
-    setViewport(createImmediateViewport(graph, focusId, depth));
-    if (graph.nodes.length > 5000) return undefined;
-
+    if (viewport.graph.nodes.length === 0 || workerGraphRef.current !== graph) {
+      setViewport(createFallbackViewport(graph));
+    }
     const worker =
       workerRef.current ??
       new Worker(new URL('../workers/graphViewport.worker.ts', import.meta.url), { type: 'module' });
     workerRef.current = worker;
+    const shouldSendGraph = workerGraphRef.current !== graph;
+    if (shouldSendGraph) workerGraphRef.current = graph;
 
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       if (requestIdRef.current !== requestId) return;
-      setViewport(event.data);
+      startTransition(() => setViewport(event.data));
     };
     worker.postMessage({
-      graph,
+      graph: shouldSendGraph ? graph : undefined,
       focusId,
       depth,
       detailLimit: 180 + depth * 90,

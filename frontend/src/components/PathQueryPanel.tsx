@@ -3,6 +3,7 @@ import { GraphEdge, GraphNode, GraphPath } from '../types/graph';
 
 type Props = {
   selected?: GraphNode;
+  nodes: GraphNode[];
   edges: GraphEdge[];
   paths: GraphPath[];
   activePathId?: string;
@@ -10,7 +11,8 @@ type Props = {
   onPickPath: (pathId: string) => void;
 };
 
-export function PathQueryPanel({ selected, edges, paths, activePathId, queryLabel, onPickPath }: Props) {
+export function PathQueryPanel({ selected, nodes, edges, paths, activePathId, queryLabel, onPickPath }: Props) {
+  const nodeNameIndex = useMemo(() => new Map(nodes.map((node) => [node.id, node.name])), [nodes]);
   const related = useMemo(
     () =>
       selected
@@ -20,6 +22,7 @@ export function PathQueryPanel({ selected, edges, paths, activePathId, queryLabe
         : [],
     [edges, selected]
   );
+  const displayNode = (id: string) => nodeNameIndex.get(id) ?? id;
 
   return (
     <section className="panel-section">
@@ -47,9 +50,9 @@ export function PathQueryPanel({ selected, edges, paths, activePathId, queryLabe
         <div className="path-list">
           {related.slice(0, 8).map((edge) => (
             <div className="path-row" key={edge.id ?? `${edge.source}-${edge.target}`}>
-              <span>{edge.source}</span>
+              <span title={edge.source}>{displayNode(edge.source)}</span>
               <b>{edge.relation_type}</b>
-              <span>{edge.target}</span>
+              <span title={edge.target}>{displayNode(edge.target)}</span>
             </div>
           ))}
         </div>

@@ -1,4 +1,4 @@
-import { Download, FileText, FileUp, LocateFixed, RefreshCw, ZoomIn, ZoomOut } from 'lucide-react';
+import { Download, FileUp, LocateFixed, RefreshCw, ZoomIn, ZoomOut } from 'lucide-react';
 import { GraphNode } from '../types/graph';
 import { SearchBox } from './SearchBox';
 
@@ -38,8 +38,8 @@ export function TopBar({
       <div className="brand">
         <span className="brand-mark" />
         <div>
-          <strong>关联关系星云图</strong>
-          <small>Relation Nebula MVP</small>
+          <strong>星域洞察</strong>
+          <small>NebulaGraph</small>
         </div>
       </div>
       <SearchBox nodes={nodes} value={query} onChange={onQueryChange} onPick={onPickNode} onSubmit={onSubmitQuery} />
@@ -47,27 +47,18 @@ export function TopBar({
         <button type="button" title="刷新数据" onClick={onRefresh}>
           <RefreshCw size={16} className={loading ? 'spin' : ''} />
         </button>
-        <label className="icon-button" title="导入 Excel">
+        <label className="icon-button" title="导入 Excel / CSV">
           <FileUp size={16} />
           <input
             type="file"
-            accept=".xlsx,.xls"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) onImportExcel(file);
-              event.target.value = '';
-            }}
-          />
-        </label>
-        <label className="icon-button" title="导入 CSV">
-          <FileText size={16} />
-          <input
-            type="file"
-            accept=".csv"
+            accept=".xlsx,.xls,.csv"
             multiple
             onChange={(event) => {
               const files = Array.from(event.target.files ?? []);
-              if (files.length) onImportCsv(files);
+              const excelFile = files.find((file) => /\.(xlsx|xls)$/i.test(file.name));
+              const csvFiles = files.filter((file) => /\.csv$/i.test(file.name));
+              if (excelFile) onImportExcel(excelFile);
+              else if (csvFiles.length) onImportCsv(csvFiles);
               event.target.value = '';
             }}
           />

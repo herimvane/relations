@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppShell } from './components/AppShell';
 import { BottomRankPanel } from './components/BottomRankPanel';
 import { LeftPanel } from './components/LeftPanel';
@@ -10,7 +10,7 @@ import { findNodeByText, mergeGraphWithPath, parsePathQuery, searchGraphPaths } 
 import { useGraphData } from './hooks/useGraphData';
 import { useGraphFilters } from './hooks/useGraphFilters';
 import { useGraphViewport } from './hooks/useGraphViewport';
-import { GraphNode, GraphPath, GraphViewCommand } from './types/graph';
+import { GraphEdge, GraphNode, GraphPath, GraphViewCommand } from './types/graph';
 
 export default function App() {
   const { data, setData, source, setSource, loading, error, setError, status, setStatus, refresh, importExcel, importCsv, loadMock } = useGraphData();
@@ -25,6 +25,7 @@ export default function App() {
   const [pathQueryLabel, setPathQueryLabel] = useState<string>();
   const [viewCommand, setViewCommand] = useState<GraphViewCommand>();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const focusedNodeIdRef = useRef<string>();
   const viewport = useGraphViewport(filters.filteredData, focusedNodeId, expansionDepth);
   const activePath = useMemo(
     () => pathResults.find((path) => path.id === activePathId) ?? pathResults[0],
@@ -37,15 +38,19 @@ export default function App() {
     [canvasData.nodes, filters.filteredData.nodes, selectedNode]
   );
 
+  useEffect(() => {
+    focusedNodeIdRef.current = focusedNodeId;
+  }, [focusedNodeId]);
+
   const pickNode = useCallback((node: GraphNode) => {
-    setExpansionDepth((currentDepth) => (node.id === focusedNodeId ? Math.min(3, currentDepth + 1) : 1));
+    setExpansionDepth((currentDepth) => (node.id === focusedNodeIdRef.current ? Math.min(3, currentDepth + 1) : 1));
     setSelectedNode(node);
     setFocusedNodeId(node.id);
     setQuery(node.name);
     setPathResults([]);
     setActivePathId(undefined);
     setPathQueryLabel(undefined);
-  }, [focusedNodeId]);
+  }, []);
 
   const clearGraphFocus = useCallback(() => {
     setSelectedNode(undefined);
@@ -75,6 +80,18 @@ export default function App() {
     filters.resetFilters();
     loadMock();
   }, [clearGraphFocus, filters, loadMock]);
+
+  const pickRankedEdge = useCallback((edge: GraphEdge) => {
+    const sourceNode = filters.filteredData.nodes.find((node) => node.id === edge.source) ?? canvasData.nodes.find((node) => node.id === edge.source);
+    const targetNode = filters.filteredData.nodes.find((node) => node.id === edge.target) ?? canvasData.nodes.find((node) => node.id === edge.target);
+    const nextNode = sourceNode ?? targetNode;
+    if (!nextNode) return;
+    setSelectedNode(nextNode);
+    setFocusedNodeId(nextNode.id);
+    setExpansionDepth(1);
+    setQuery(nextNode.name);
+    setHoveredNode(undefined);
+  }, [canvasData.nodes, filters.filteredData.nodes]);
 
   const submitQuery = useCallback(() => {
     const pathQuery = parsePathQuery(query);
@@ -184,7 +201,14 @@ export default function App() {
           onPickPath={setActivePathId}
         />
       }
-      bottom={<BottomRankPanel edges={canvasData.edges} />}
+      bottom={
+        <BottomRankPanel
+          edges={canvasData.edges}
+          nodes={canvasData.nodes}
+          activePath={activePath}
+          onPickEdge={pickRankedEdge}
+        />
+      }
     />
   );
 }

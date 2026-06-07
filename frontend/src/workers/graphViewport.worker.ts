@@ -1,11 +1,16 @@
 import { GraphData, GraphEdge, GraphNode } from '../types/graph';
+import { rankCoreNodes } from '../graph/coreScore';
 
 type Request = {
-  graph: GraphData;
+  graph?: GraphData;
   focusId?: string;
   depth: number;
   detailLimit: number;
   clusterThreshold: number;
+};
+
+type BuildRequest = Request & {
+  graph: GraphData;
 };
 
 type Response = {
@@ -22,6 +27,28 @@ type Response = {
 
 function opposite(edge: GraphEdge, nodeId: string) {
   return edge.source === nodeId ? edge.target : edge.source;
+}
+
+function createEdgeCollector() {
+  const refs = new WeakSet<GraphEdge>();
+  const ids = new Set<string>();
+  const edges: GraphEdge[] = [];
+
+  return {
+    add(edge: GraphEdge) {
+      if (edge.id) {
+        if (ids.has(edge.id)) return;
+        ids.add(edge.id);
+      } else {
+        if (refs.has(edge)) return;
+        refs.add(edge);
+      }
+      edges.push(edge);
+    },
+    values() {
+      return edges;
+    }
+  };
 }
 
 function clusterId(group: string, type: string) {
@@ -44,10 +71,9 @@ function makeClusterNode(group: string, type: string, count: number, weight: num
 
 function buildOverview(graph: GraphData, sourceNodeCount: number, sourceEdgeCount: number): Response {
   const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
-  const coreNodes = graph.nodes.filter((node) => node.type === '核心主体').slice(0, 8);
-  const focusNodes = coreNodes.length ? coreNodes : graph.nodes.slice(0, 1);
+  const focusNodes = rankCoreNodes(graph).map((item) => item.node).slice(0, 8);
   const detailIds = new Set(focusNodes.map((node) => node.id));
-  const detailEdges: GraphEdge[] = [];
+  const detailEdges = createEdgeCollector();
   const clusters = new Map<string, { coreId: string; group: string; type: string; count: number; weight: number }>();
 
   focusNodes.forEach((core) => {
@@ -55,7 +81,7 @@ function buildOverview(graph: GraphData, sourceNodeCount: number, sourceEdgeCoun
       .filter((edge) => edge.source === core.id || edge.target === core.id)
       .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
     incident.slice(0, 28).forEach((edge) => {
-      detailEdges.push(edge);
+      detailEdges.add(edge);
       detailIds.add(opposite(edge, core.id));
     });
     incident.slice(28).forEach((edge) => {
@@ -84,7 +110,7 @@ function buildOverview(graph: GraphData, sourceNodeCount: number, sourceEdgeCoun
   }));
   const result = {
     nodes: [...graph.nodes.filter((node) => detailIds.has(node.id)), ...clusterNodes],
-    edges: [...detailEdges, ...clusterEdges]
+    edges: [...detailEdges.values(), ...clusterEdges]
   };
 
   return {
@@ -100,7 +126,7 @@ function buildOverview(graph: GraphData, sourceNodeCount: number, sourceEdgeCoun
   };
 }
 
-function buildViewport({ graph, focusId, depth, detailLimit, clusterThreshold }: Request): Response {
+function buildViewport({ graph, focusId, depth, detailLimit, clusterThreshold }: BuildRequest): Response {
   const sourceNodeCount = graph.nodes.length;
   const sourceEdgeCount = graph.edges.length;
   const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
@@ -256,6 +282,23 @@ function buildViewport({ graph, focusId, depth, detailLimit, clusterThreshold }:
   };
 }
 
+let currentGraph: GraphData | undefined;
+
 self.onmessage = (event: MessageEvent<Request>) => {
-  self.postMessage(buildViewport(event.data));
+  if (event.data.graph) currentGraph = event.data.graph;
+  if (!currentGraph) {
+    self.postMessage({
+      graph: { nodes: [], edges: [] },
+      stats: {
+        mode: 'detail',
+        sourceNodeCount: 0,
+        sourceEdgeCount: 0,
+        visibleNodeCount: 0,
+        visibleEdgeCount: 0,
+        hiddenNodeCount: 0
+      }
+    } satisfies Response);
+    return;
+  }
+  self.postMessage(buildViewport({ ...event.data, graph: currentGraph }));
 };

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { GraphData, GraphNode, GraphPath, GraphViewCommand, NodePosition } from '../types/graph';
+import { animateCosmicDust, createCosmicDustLayers } from './cosmicDust';
 import { createForceLayout } from './createForceLayout';
-import { colorForGroup, colorForRelation } from './graphTheme';
+import { rankCoreNodes } from './coreScore';
+import { buildNodeTierIndex, edgeStyleForWeight, nebulaTheme, nodeStyleForTier } from './graphTheme';
 import { edgeTouches, neighborIds } from './graphInteractions';
 
 type Props = {
@@ -39,6 +41,14 @@ type FocusTarget = {
   active: boolean;
 };
 
+type GraphRuntime = {
+  root: THREE.Group;
+  camera: THREE.PerspectiveCamera;
+  cameraFov: number;
+  nodeMap: Map<string, NodePosition>;
+  layout: NodePosition[];
+};
+
 const DEFAULT_ROOT_ROTATION = new THREE.Euler(-0.32, 0.38, -0.04);
 const LARGE_GRAPH_NODE_THRESHOLD = 2500;
 const LARGE_GRAPH_EDGE_LIMIT = 1800;
@@ -50,6 +60,7 @@ const MAX_CAMERA_Z = 2750;
 const CAMERA_Y_OFFSET = 24;
 const ZOOM_IN_FACTOR = 0.84;
 const ZOOM_OUT_FACTOR = 1.18;
+let cachedNebulaCloudTextures: THREE.CanvasTexture[] | undefined;
 
 function makeGlowTexture() {
   const canvas = document.createElement('canvas');
@@ -65,6 +76,90 @@ function makeGlowTexture() {
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, 128, 128);
   return new THREE.CanvasTexture(canvas);
+}
+
+function makeDustTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, 64, 64);
+  const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 31);
+  gradient.addColorStop(0, 'rgba(255,255,255,0.95)');
+  gradient.addColorStop(0.22, 'rgba(255,255,255,0.46)');
+  gradient.addColorStop(0.58, 'rgba(255,255,255,0.12)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(canvas);
+}
+
+function seededRandom(seed: string) {
+  let state = hashString(seed) || 1;
+  return () => {
+    state = Math.imul(state ^ (state >>> 15), 2246822507);
+    state = Math.imul(state ^ (state >>> 13), 3266489909);
+    return ((state ^= state >>> 16) >>> 0) / 4294967295;
+  };
+}
+
+function makeNebulaCloudTexture(seed = Math.random().toString(36).slice(2)) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d')!;
+  const size = 256;
+  const random = seededRandom(seed);
+  ctx.clearRect(0, 0, size, size);
+  ctx.globalCompositeOperation = 'lighter';
+
+  for (let i = 0; i < 18; i += 1) {
+    const x = size * (0.22 + random() * 0.56);
+    const y = size * (0.24 + random() * 0.52);
+    const radius = size * (0.09 + random() * 0.2);
+    const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    const alpha = 0.03 + random() * 0.08;
+    gradient.addColorStop(0, `rgba(255,255,255,${alpha})`);
+    gradient.addColorStop(0.46, `rgba(255,255,255,${alpha * 0.48})`);
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(random() * Math.PI);
+    ctx.scale(1.1 + random() * 2.2, 0.35 + random() * 0.5);
+    ctx.translate(-x, -y);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+    ctx.restore();
+  }
+
+  ctx.globalCompositeOperation = 'destination-out';
+  for (let i = 0; i < 5; i += 1) {
+    const y = size * (0.28 + random() * 0.44);
+    const gradient = ctx.createLinearGradient(0, y - 18, size, y + 18);
+    gradient.addColorStop(0, 'rgba(0,0,0,0)');
+    gradient.addColorStop(0.5, `rgba(0,0,0,${0.12 + random() * 0.18})`);
+    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.save();
+    ctx.translate(size / 2, size / 2);
+    ctx.rotate((random() - 0.5) * 1.1);
+    ctx.translate(-size / 2, -size / 2);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(-size * 0.15, y - 24, size * 1.3, 48);
+    ctx.restore();
+  }
+
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.filter = 'blur(6px)';
+  ctx.drawImage(canvas, 0, 0);
+  ctx.filter = 'none';
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function getNebulaCloudTextures() {
+  cachedNebulaCloudTextures ??= Array.from({ length: 4 }, (_, index) => makeNebulaCloudTexture(`nebula-${index}-${Math.random()}`));
+  return cachedNebulaCloudTextures;
 }
 
 function makeStarburstTexture() {
@@ -197,6 +292,26 @@ function hashUnit(value: string) {
 
 function graphEdgeKey(edge: { id?: string; source: string; target: string; relation_type: string }) {
   return edge.id ?? `${edge.source}-${edge.target}-${edge.relation_type}`;
+}
+
+function graphEdgeSignatures(edge: { id?: string; source: string; target: string; relation_type: string }) {
+  const relation = edge.relation_type || '';
+  const directional = `${edge.source}->${edge.target}::${relation}`;
+  const reverse = `${edge.target}->${edge.source}::${relation}`;
+  const unordered = [edge.source, edge.target].sort().join('<->') + `::${relation}`;
+  return [edge.id, directional, reverse, unordered].filter((item): item is string => Boolean(item));
+}
+
+function edgeSignatureSet(edges?: { id?: string; source: string; target: string; relation_type: string }[]) {
+  const signatures = new Set<string>();
+  edges?.forEach((edge) => {
+    graphEdgeSignatures(edge).forEach((signature) => signatures.add(signature));
+  });
+  return signatures;
+}
+
+function edgeMatchesSignatures(edge: { id?: string; source: string; target: string; relation_type: string }, signatures: Set<string>) {
+  return graphEdgeSignatures(edge).some((signature) => signatures.has(signature));
 }
 
 function midpointCurve(
@@ -337,17 +452,10 @@ function chooseBestFitView(
 
 function representativeOverviewNodes(nodes: NodePosition[], edges: GraphData['edges']) {
   if (nodes.length <= 160) return nodes;
-  const degree = new Map<string, number>();
-  edges.forEach((edge) => {
-    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1);
-    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1);
-  });
-  return [...nodes]
-    .sort((a, b) => {
-      const scoreA = (a.weight ?? 0) * 1.7 + (degree.get(a.id) ?? 0) * 12;
-      const scoreB = (b.weight ?? 0) * 1.7 + (degree.get(b.id) ?? 0) * 12;
-      return scoreB - scoreA;
-    })
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  return rankCoreNodes({ nodes, edges })
+    .map((item) => nodeMap.get(item.node.id))
+    .filter((node): node is NodePosition => Boolean(node))
     .slice(0, 160);
 }
 
@@ -368,9 +476,11 @@ export function NebulaGraph({
   const focusedRef = useRef(focusedNodeId);
   const viewStateRef = useRef<ViewState>();
   const focusTargetRef = useRef<FocusTarget>();
+  const runtimeRef = useRef<GraphRuntime>();
   const viewCommandRef = useRef(viewCommand);
   const visibleRelations = useMemo(() => new Set(relationTypes), [relationTypes]);
   const layout = useMemo(() => createForceLayout(data), [data]);
+  const nodeTierIndex = useMemo(() => buildNodeTierIndex(data), [data]);
 
   useEffect(() => {
     selectedRef.current = selectedNodeId;
@@ -382,11 +492,73 @@ export function NebulaGraph({
   }, [viewCommand]);
 
   useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+
+    const pathNodeIds = new Set(highlightedPath?.nodes.map((node) => node.id) ?? []);
+    if (pathNodeIds.size > 0) {
+      const pathNodes = Array.from(pathNodeIds)
+        .map((id) => runtime.nodeMap.get(id))
+        .filter((node): node is NodePosition => Boolean(node));
+      const focusFit = chooseBestFitView(
+        pathNodes,
+        runtime.root.rotation,
+        runtime.camera.aspect,
+        runtime.cameraFov,
+        runtime.root.scale.x,
+        {
+          padding: Math.max(1.08, focusPadding(pathNodes.length)),
+          minFrame: 430,
+          minCameraZ: 520
+        }
+      );
+      focusTargetRef.current = {
+        id: `path-${highlightedPath?.id}`,
+        center: focusFit.center,
+        cameraZ: focusFit.cameraZ,
+        rotation: focusFit.rotation,
+        active: true
+      };
+      return;
+    }
+
+    if (!focusedNodeId) {
+      focusTargetRef.current = undefined;
+      return;
+    }
+
+    const activeIds = neighborIds(data, selectedNodeId, 1);
+    if (!activeIds.has(focusedNodeId)) activeIds.add(focusedNodeId);
+    const focusNodes = Array.from(activeIds)
+      .map((id) => runtime.nodeMap.get(id))
+      .filter((node): node is NodePosition => Boolean(node));
+    const focusFit = chooseBestFitView(
+      focusNodes,
+      runtime.root.rotation,
+      runtime.camera.aspect,
+      runtime.cameraFov,
+      runtime.root.scale.x,
+      {
+        padding: focusPadding(focusNodes.length),
+        minFrame: 480,
+        minCameraZ: 560
+      }
+    );
+    focusTargetRef.current = {
+      id: focusedNodeId,
+      center: focusFit.center,
+      cameraZ: focusFit.cameraZ,
+      rotation: focusFit.rotation,
+      active: true
+    };
+  }, [data, focusedNodeId, highlightedPath, selectedNodeId]);
+
+  useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return undefined;
 
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x0a0e14, 0.00072);
+    scene.fog = new THREE.FogExp2(nebulaTheme.background.fog, 0.00072);
 
     const cameraFov = 48;
     const camera = new THREE.PerspectiveCamera(cameraFov, mount.clientWidth / mount.clientHeight, 1, 4200);
@@ -395,7 +567,7 @@ export function NebulaGraph({
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(mount.clientWidth, mount.clientHeight);
-    renderer.setClearColor(0x0a0e14, 0);
+    renderer.setClearColor(new THREE.Color(nebulaTheme.background.canvas), 0);
     mount.appendChild(renderer.domElement);
     onCanvasReady?.(renderer.domElement);
 
@@ -420,12 +592,12 @@ export function NebulaGraph({
       camera.position.z = initialFit.cameraZ;
     }
 
-    const ambient = new THREE.AmbientLight(0xa7c7ff, 0.92);
+    const ambient = new THREE.AmbientLight(0xbfc9d9, 0.74);
     scene.add(ambient);
-    const point = new THREE.PointLight(0x8cd7ff, 2.8, 1400);
+    const point = new THREE.PointLight(0xffe8d6, 2.2, 1400);
     point.position.set(0, -80, 360);
     scene.add(point);
-    const rim = new THREE.PointLight(0x3b82f6, 1.1, 1800);
+    const rim = new THREE.PointLight(0x65d6ff, 0.72, 1800);
     rim.position.set(-420, 280, 520);
     scene.add(rim);
 
@@ -441,18 +613,27 @@ export function NebulaGraph({
       starPositions[i * 3 + 2] = r * Math.cos(p) - 260;
     }
     starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
-    const stars = new THREE.Points(
-      starGeo,
-      new THREE.PointsMaterial({ color: 0x90a9d4, size: 1.45, transparent: true, opacity: 0.5, depthWrite: false })
-    );
-    scene.add(stars);
-
     const glowTexture = makeGlowTexture();
+    const dustTexture = makeDustTexture();
+    const nebulaCloudTextures = getNebulaCloudTextures();
     const starburstTexture = makeStarburstTexture();
     const starCoreTexture = makeStarCoreTexture();
     const hotCoreTexture = makeHotCoreTexture();
+    const stars = new THREE.Points(
+      starGeo,
+      new THREE.PointsMaterial({
+        map: dustTexture,
+        color: 0xffffff,
+        size: 2.3,
+        transparent: true,
+        opacity: 0.18,
+        alphaTest: 0.02,
+        depthWrite: false
+      })
+    );
+    scene.add(stars);
     const dustGeo = new THREE.BufferGeometry();
-    const dustCount = 620;
+    const dustCount = 1200;
     const dustPositions = new Float32Array(dustCount * 3);
     for (let i = 0; i < dustCount; i += 1) {
       const r = 760 + Math.random() * 1320;
@@ -466,28 +647,38 @@ export function NebulaGraph({
     const dust = new THREE.Points(
       dustGeo,
       new THREE.PointsMaterial({
-        color: 0x60789c,
-        size: 1.15,
+        map: dustTexture,
+        color: nebulaTheme.background.dust,
+        size: 2.1,
         transparent: true,
-        opacity: 0.24,
+        opacity: 0.08,
+        alphaTest: 0.015,
         depthWrite: false
       })
     );
     scene.add(dust);
 
     const nodeMap = new Map(layout.map((node) => [node.id, node]));
+    runtimeRef.current = {
+      root,
+      camera,
+      cameraFov,
+      nodeMap,
+      layout
+    };
     const activeIds = neighborIds(data, selectedNodeId, 1);
     const hasSelection = Boolean(selectedNodeId);
-    const pathEdgeKeys = new Set(highlightedPath?.edges.map(graphEdgeKey) ?? []);
+    const pathEdgeKeys = edgeSignatureSet(highlightedPath?.edges);
     const pathNodeIds = new Set(highlightedPath?.nodes.map((node) => node.id) ?? []);
     const hasPath = pathEdgeKeys.size > 0;
+    const edgeOpacity = (active: boolean) => (hasPath ? (active ? 1 : 0.05) : hasSelection ? (active ? 1 : 0.05) : 0.22);
+    const particleOpacity = (active: boolean) => (hasPath ? (active ? 0.88 : 0.16) : hasSelection ? (active ? 0.72 : 0.2) : 0.42);
+    const trailOpacity = (active: boolean) => (hasPath ? (active ? 0.16 : 0.055) : active ? 0.12 : 0.05);
     const largeGraph = layout.length > LARGE_GRAPH_NODE_THRESHOLD;
     const nodeMeshes: NodeMesh[] = [];
     const raycastTargets: THREE.Object3D[] = [];
 
-    const filteredEdges = data.edges.filter(
-      (edge) => visibleRelations.has(edge.relation_type) && (edge.weight ?? 0) >= minWeight
-    );
+    const filteredEdges = data.edges.filter((edge) => visibleRelations.has(edge.relation_type) && (edge.weight ?? 0) >= minWeight);
     const focusEdges =
       largeGraph && selectedNodeId
         ? filteredEdges
@@ -495,7 +686,7 @@ export function NebulaGraph({
             .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
             .slice(0, LARGE_GRAPH_FOCUS_EDGE_LIMIT)
         : [];
-    const focusEdgeKeys = new Set(focusEdges.map(graphEdgeKey));
+    const focusEdgeRefs = new WeakSet<GraphData['edges'][number]>(focusEdges);
     const focusDetailIds = new Set<string>(selectedNodeId ? [selectedNodeId] : []);
     focusEdges.forEach((edge) => {
       focusDetailIds.add(edge.source);
@@ -508,7 +699,7 @@ export function NebulaGraph({
         ? [
             ...focusEdges,
             ...filteredEdges
-              .filter((edge) => !focusEdgeKeys.has(graphEdgeKey(edge)))
+              .filter((edge) => !focusEdgeRefs.has(edge))
               .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
               .slice(0, Math.max(0, LARGE_GRAPH_EDGE_LIMIT - focusEdges.length))
           ]
@@ -565,10 +756,15 @@ export function NebulaGraph({
       focusTargetRef.current = undefined;
     }
 
+    const cloudLayer = new THREE.Group();
+    cloudLayer.position.set(0, 0, 0);
+    cloudLayer.scale.setScalar(0.88);
+    scene.add(cloudLayer);
+    const dustGroup = new THREE.Group();
     const edgeGroup = new THREE.Group();
     const particleGroup = new THREE.Group();
     const nodeGroup = new THREE.Group();
-    root.add(edgeGroup, particleGroup, nodeGroup);
+    root.add(dustGroup, edgeGroup, particleGroup, nodeGroup);
 
     const largeActiveLinePositions: number[] = [];
     const largeActiveLineColors: number[] = [];
@@ -604,44 +800,68 @@ export function NebulaGraph({
       edgeGroup.add(lines);
     };
 
+    const cosmicDust = createCosmicDustLayers({
+      data,
+      layout,
+      visibleEdges,
+      highlightedPathEdges: highlightedPath?.edges,
+      selectedNodeId,
+      activeIds,
+      nodeTierIndex,
+      hasPath,
+      hasSelection,
+      textures: {
+        dust: dustTexture,
+        cloud: nebulaCloudTextures[0],
+        clouds: nebulaCloudTextures
+      }
+    });
+    cloudLayer.add(cosmicDust.cloudGroup);
+    dustGroup.add(cosmicDust.dustGroup);
+
     let animatedEdgeCount = 0;
-    visibleEdges.forEach((edge) => {
-        const source = nodeMap.get(edge.source);
-        const target = nodeMap.get(edge.target);
-        if (!source || !target) {
-          console.warn('[NebulaGraph] Edge skipped because endpoint node is missing', edge);
-          return;
-        }
-        const color = new THREE.Color(colorForRelation(edge.relation_type));
-        const key = graphEdgeKey(edge);
-        const isPathEdge = pathEdgeKeys.has(key);
-        const lineColor = isPathEdge ? new THREE.Color(0xa7f3ff) : color;
-        const isActive = hasPath
-          ? isPathEdge
-          : largeGraph && hasSelection
-            ? focusEdgeKeys.has(key)
-            : !hasSelection || edgeTouches(edge, activeIds);
-        const material = new THREE.LineBasicMaterial({
-          color: lineColor,
-          transparent: true,
-          opacity: hasPath ? (isActive ? 0.68 : 0.035) : hasSelection ? (isActive ? 0.5 : 0.06) : 0.2,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false
-        });
-        const curve = midpointCurve(source, target, {
-          key,
-          weight: edge.weight,
-          active: isActive,
-          lift: isActive ? 0.92 : 1.08
-        });
-        if (largeGraph) {
-          appendLargeCurveSegments(curve, lineColor, isActive);
-        } else {
-          const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(48));
-          const line = new THREE.Line(geometry, material);
-          line.renderOrder = isActive ? 2 : 1;
-          edgeGroup.add(line);
-        }
+    visibleEdges.forEach((edge, edgeIndex) => {
+      const source = nodeMap.get(edge.source);
+      const target = nodeMap.get(edge.target);
+      if (!source || !target) {
+        console.warn('[NebulaGraph] Edge skipped because endpoint node is missing', edge);
+        return;
+      }
+      const edgeStyle = edgeStyleForWeight(edge.weight ?? 1);
+      const baseColor = new THREE.Color(edgeStyle.color);
+      const key = `${graphEdgeKey(edge)}-${edgeIndex}`;
+      const isPathEdge = edgeMatchesSignatures(edge, pathEdgeKeys);
+      if (hasPath && isPathEdge) return;
+      const analysisColor = new THREE.Color(nebulaTheme.path.line);
+      const pathParticleColor = new THREE.Color(nebulaTheme.path.particle);
+      const isActive = hasPath
+        ? isPathEdge
+        : largeGraph && hasSelection
+          ? focusEdgeRefs.has(edge)
+          : !hasSelection || edgeTouches(edge, activeIds);
+      const color = hasPath && isPathEdge ? pathParticleColor : baseColor;
+      const lineColor = hasPath && isPathEdge ? analysisColor : hasPath ? baseColor.clone().lerp(new THREE.Color(0x475569), 0.5) : baseColor;
+      const material = new THREE.LineBasicMaterial({
+        color: lineColor,
+        transparent: true,
+        opacity: hasPath && isPathEdge ? edgeOpacity(isActive) : Math.min(edgeOpacity(isActive), edgeStyle.opacity + (isActive ? 0.2 : 0)),
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      });
+      const curve = midpointCurve(source, target, {
+        key,
+        weight: edge.weight,
+        active: isActive,
+        lift: isActive ? 0.92 : 1.08
+      });
+      if (largeGraph) {
+        appendLargeCurveSegments(curve, lineColor, isActive);
+      } else {
+        const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(48));
+        const line = new THREE.Line(geometry, material);
+        line.renderOrder = isActive ? 2 : 1;
+        edgeGroup.add(line);
+      }
 
         const animationLimit = hasPath ? 36 : hasSelection ? LARGE_GRAPH_FOCUS_ANIMATED_EDGE_LIMIT : LARGE_GRAPH_ANIMATED_EDGE_LIMIT;
         const shouldAnimate =
@@ -654,12 +874,12 @@ export function NebulaGraph({
             map: glowTexture,
             color,
             transparent: true,
-            opacity: hasPath ? (isActive ? 0.74 : 0.1) : hasSelection ? (isActive ? 0.68 : 0.18) : 0.42,
+            opacity: particleOpacity(isActive),
             blending: THREE.AdditiveBlending,
             depthWrite: false
           });
           const particle = new THREE.Sprite(particleMaterial);
-          particle.scale.set(isActive ? 6.2 : 4.6, isActive ? 6.2 : 4.6, 1);
+          particle.scale.set(isActive ? 6.8 : 4.8, isActive ? 6.8 : 4.8, 1);
           particle.renderOrder = isActive ? 5 : 4;
           particle.userData = {
             curve,
@@ -674,12 +894,12 @@ export function NebulaGraph({
                 map: glowTexture,
                 color,
                 transparent: true,
-                opacity: (isActive ? 0.11 : 0.045) / trailIndex,
+                opacity: trailOpacity(isActive) / trailIndex,
                 blending: THREE.AdditiveBlending,
                 depthWrite: false
               })
             );
-            const trailSize = (isActive ? 4.4 : 3.1) / Math.sqrt(trailIndex);
+            const trailSize = (isActive ? 4.9 : 3.2) / Math.sqrt(trailIndex);
             trail.scale.set(trailSize, trailSize, 1);
             trail.renderOrder = isActive ? 4 : 3;
             trail.userData = {
@@ -694,8 +914,81 @@ export function NebulaGraph({
       });
 
     if (largeGraph) {
-      addMergedLines(largeMutedLinePositions, largeMutedLineColors, hasPath ? 0.025 : hasSelection ? 0.035 : 0.12, 1);
-      addMergedLines(largeActiveLinePositions, largeActiveLineColors, hasPath ? 0.62 : hasSelection ? 0.48 : 0.2, 2);
+      addMergedLines(largeMutedLinePositions, largeMutedLineColors, hasPath || hasSelection ? 0.05 : 0.13, 1);
+      addMergedLines(largeActiveLinePositions, largeActiveLineColors, hasPath || hasSelection ? 1 : 0.22, 2);
+    }
+
+    if (hasPath && highlightedPath) {
+      const pathLineColor = new THREE.Color(nebulaTheme.path.line);
+      const pathParticleColor = new THREE.Color(nebulaTheme.path.particle);
+      highlightedPath.edges.forEach((edge, index) => {
+        const source = nodeMap.get(edge.source);
+        const target = nodeMap.get(edge.target);
+        if (!source || !target) return;
+
+        const curve = midpointCurve(source, target, {
+          key: `path-overlay-${index}-${graphEdgeKey(edge)}`,
+          weight: Math.max(edge.weight ?? 50, 86),
+          active: true,
+          lift: 0.82
+        });
+        const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(72));
+        const line = new THREE.Line(
+          geometry,
+          new THREE.LineBasicMaterial({
+            color: pathLineColor,
+            transparent: true,
+            opacity: 0.96,
+            blending: THREE.AdditiveBlending,
+            depthTest: false,
+            depthWrite: false
+          })
+        );
+        line.renderOrder = 9;
+        edgeGroup.add(line);
+
+        const progress = (index * 0.19 + Math.random() * 0.18) % 1;
+        const speed = 0.0032 + (edge.weight ?? 40) / 90000;
+        const particle = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: glowTexture,
+            color: pathParticleColor,
+            transparent: true,
+            opacity: 0.94,
+            blending: THREE.AdditiveBlending,
+            depthTest: false,
+            depthWrite: false
+          })
+        );
+        particle.scale.set(7.2, 7.2, 1);
+        particle.renderOrder = 10;
+        particle.userData = { curve, progress, speed };
+        particleGroup.add(particle);
+
+        for (let trailIndex = 1; trailIndex <= 3; trailIndex += 1) {
+          const trail = new THREE.Sprite(
+            new THREE.SpriteMaterial({
+              map: glowTexture,
+              color: pathParticleColor,
+              transparent: true,
+              opacity: 0.18 / trailIndex,
+              blending: THREE.AdditiveBlending,
+              depthTest: false,
+              depthWrite: false
+            })
+          );
+          const trailSize = 5.4 / Math.sqrt(trailIndex);
+          trail.scale.set(trailSize, trailSize, 1);
+          trail.renderOrder = 9;
+          trail.userData = {
+            curve,
+            progress: (progress - trailIndex * 0.026 + 1) % 1,
+            speed,
+            trailing: trailIndex
+          };
+          particleGroup.add(trail);
+        }
+      });
     }
 
     if (largeGraph) {
@@ -703,7 +996,9 @@ export function NebulaGraph({
       const pointPositions = new Float32Array(layout.length * 3);
       const pointColors = new Float32Array(layout.length * 3);
       layout.forEach((node, index) => {
-        const color = new THREE.Color(colorForGroup(node.group));
+        const tier = nodeTierIndex.get(node.id) ?? 'tertiary';
+        const tierStyle = nodeStyleForTier(tier);
+        const color = new THREE.Color(tierStyle.color).lerp(new THREE.Color(tierStyle.glow), tier === 'core' ? 0.18 : 0.28);
         pointPositions[index * 3] = node.x;
         pointPositions[index * 3 + 1] = node.y;
         pointPositions[index * 3 + 2] = node.z;
@@ -716,10 +1011,12 @@ export function NebulaGraph({
       const nodePoints = new THREE.Points(
         pointGeometry,
         new THREE.PointsMaterial({
+          map: dustTexture,
           vertexColors: true,
-          size: hasPath || hasSelection ? 3.2 : 5.6,
+          size: hasPath || hasSelection ? 5.2 : 7.2,
           transparent: true,
-          opacity: hasPath ? 0.13 : hasSelection ? 0.2 : 0.76,
+          opacity: hasPath ? 0.28 : hasSelection ? 0.34 : 0.76,
+          alphaTest: 0.02,
           blending: THREE.AdditiveBlending,
           depthWrite: false
         })
@@ -735,19 +1032,26 @@ export function NebulaGraph({
         !largeGraph || (hasPath && pathNodeIds.has(node.id)) || (hasSelection && focusDetailIds.has(node.id)) || (!hasSelection && (node.weight ?? 0) >= 82);
       if (!shouldRenderDetailedNode) return;
 
-      const color = new THREE.Color(colorForGroup(node.group));
+      const tier = nodeTierIndex.get(node.id) ?? 'tertiary';
+      const tierStyle = nodeStyleForTier(tier);
       const isActive = hasPath
         ? pathNodeIds.has(node.id)
         : largeGraph && hasSelection
           ? focusDetailIds.has(node.id)
           : !hasSelection || activeIds.has(node.id);
+      const isPathNode = hasPath && pathNodeIds.has(node.id);
+      const glowColor = isPathNode ? new THREE.Color(nebulaTheme.path.nodeGlow) : new THREE.Color(tierStyle.glow);
+      const bodyColor = isPathNode ? new THREE.Color(nebulaTheme.path.nodeCore) : new THREE.Color(tierStyle.color);
+      const coreColor = isPathNode ? new THREE.Color(nebulaTheme.path.nodeCore) : new THREE.Color(tierStyle.core);
       const baseRadius = Math.max(6.4, Math.min(15.2, 5.7 + (node.weight ?? 20) / 9.5));
-      const radius = baseRadius * (isActive && (hasSelection || hasPath) ? 1.18 : 1);
-      const starburstOpacity = isActive ? 0.68 : 0.1;
-      const coreOpacity = isActive ? 0.78 : 0.18;
-      const hotCoreOpacity = isActive ? 0.84 : 0.22;
+      const tierScale = tier === 'core' ? 1.18 : tier === 'primary' ? 1.1 : tier === 'special' ? 1.08 : 1;
+      const radius = baseRadius * tierScale * (isActive && (hasSelection || hasPath) ? 1.16 : 1);
+      const inactiveOpacity = hasSelection || hasPath ? nebulaTheme.interaction.unrelatedNodeOpacity : 0.2;
+      const starburstOpacity = isActive ? (hasPath ? 0.8 : 0.68) : inactiveOpacity;
+      const coreOpacity = isActive ? (hasPath ? 0.92 : 0.78) : Math.max(0.1, inactiveOpacity * 1.4);
+      const hotCoreOpacity = isActive ? (hasPath ? 0.96 : 0.84) : Math.max(0.12, inactiveOpacity * 1.6);
       const material = new THREE.MeshBasicMaterial({
-        color,
+        color: bodyColor,
         transparent: true,
         opacity: 0,
         depthWrite: false
@@ -763,7 +1067,7 @@ export function NebulaGraph({
       const starburst = new THREE.Sprite(
         new THREE.SpriteMaterial({
           map: starburstTexture,
-          color,
+          color: glowColor,
           transparent: true,
           opacity: starburstOpacity,
           blending: THREE.AdditiveBlending,
@@ -785,7 +1089,7 @@ export function NebulaGraph({
       const core = new THREE.Sprite(
         new THREE.SpriteMaterial({
           map: starCoreTexture,
-          color,
+          color: bodyColor,
           transparent: true,
           opacity: coreOpacity,
           blending: THREE.AdditiveBlending,
@@ -802,7 +1106,7 @@ export function NebulaGraph({
       const hotCore = new THREE.Sprite(
         new THREE.SpriteMaterial({
           map: hotCoreTexture,
-          color: 0xffffff,
+          color: coreColor,
           transparent: true,
           opacity: hotCoreOpacity,
           blending: THREE.AdditiveBlending,
@@ -972,6 +1276,9 @@ export function NebulaGraph({
         }
       }
       stars.rotation.z += 0.00008;
+      const backgroundDustOpacity = hasPath || hasSelection ? 0.04 : 0.08;
+      (dust.material as THREE.PointsMaterial).opacity = backgroundDustOpacity * (1 + Math.sin(elapsed * 0.7) * 0.08);
+      animateCosmicDust(cosmicDust, performance.now() * 0.001);
       point.intensity = 2.2 + Math.sin(elapsed * 1.5) * 0.25;
       particleGroup.children.forEach((sprite) => {
         const { curve, speed } = sprite.userData as { curve: THREE.CatmullRomCurve3; progress: number; speed: number };
@@ -1032,6 +1339,7 @@ export function NebulaGraph({
       renderer.domElement.removeEventListener('pointerup', onPointerUp);
       renderer.domElement.removeEventListener('wheel', onWheel);
       renderer.dispose();
+      if (runtimeRef.current?.root === root) runtimeRef.current = undefined;
       mount.removeChild(renderer.domElement);
     };
   }, [
@@ -1040,6 +1348,7 @@ export function NebulaGraph({
     highlightedPath,
     layout,
     minWeight,
+    nodeTierIndex,
     onCanvasReady,
     onHoverNode,
     onSelectNode,
