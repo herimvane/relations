@@ -26,6 +26,7 @@ type ViewState = {
   rootRotation: THREE.Euler;
   rootScale: number;
   cameraZ: number;
+  dataSignature: string;
 };
 
 type FitView = {
@@ -50,6 +51,7 @@ type GraphRuntime = {
 };
 
 const DEFAULT_ROOT_ROTATION = new THREE.Euler(-0.32, 0.38, -0.04);
+const COMMUNITY_ROOT_ROTATION = new THREE.Euler(-0.48, 0.66, -0.06);
 const LARGE_GRAPH_NODE_THRESHOLD = 2500;
 const LARGE_GRAPH_EDGE_LIMIT = 1800;
 const LARGE_GRAPH_FOCUS_EDGE_LIMIT = 120;
@@ -61,6 +63,17 @@ const CAMERA_Y_OFFSET = 24;
 const ZOOM_IN_FACTOR = 0.84;
 const ZOOM_OUT_FACTOR = 1.18;
 let cachedNebulaCloudTextures: THREE.CanvasTexture[] | undefined;
+
+function makeHitMaterial() {
+  return new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    transparent: true,
+    opacity: 0,
+    depthTest: false,
+    depthWrite: false,
+    colorWrite: false
+  });
+}
 
 function makeGlowTexture() {
   const canvas = document.createElement('canvas');
@@ -247,6 +260,100 @@ function makeHotCoreTexture() {
   return new THREE.CanvasTexture(canvas);
 }
 
+function makeRippleTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 192;
+  canvas.height = 192;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, 192, 192);
+  const center = 96;
+  const ring = ctx.createRadialGradient(center, center, 44, center, center, 92);
+  ring.addColorStop(0, 'rgba(190,235,255,0)');
+  ring.addColorStop(0.42, 'rgba(190,235,255,0.006)');
+  ring.addColorStop(0.6, 'rgba(190,235,255,0.18)');
+  ring.addColorStop(0.7, 'rgba(255,242,168,0.05)');
+  ring.addColorStop(0.84, 'rgba(190,235,255,0.018)');
+  ring.addColorStop(1, 'rgba(190,235,255,0)');
+  ctx.fillStyle = ring;
+  ctx.fillRect(0, 0, 192, 192);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  return texture;
+}
+
+function makeCommunityRegionTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 192;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  ctx.globalCompositeOperation = 'lighter';
+
+  const drawDisk = (alpha: number, scaleX: number, scaleY: number, offsetX = 0, offsetY = 0) => {
+    const gradient = ctx.createRadialGradient(cx + offsetX, cy + offsetY, 0, cx + offsetX, cy + offsetY, 106);
+    gradient.addColorStop(0, `rgba(255,255,245,${alpha * 0.96})`);
+    gradient.addColorStop(0.15, `rgba(225,240,255,${alpha * 0.58})`);
+    gradient.addColorStop(0.42, `rgba(158,196,218,${alpha * 0.24})`);
+    gradient.addColorStop(0.72, `rgba(116,145,150,${alpha * 0.09})`);
+    gradient.addColorStop(1, 'rgba(116,145,150,0)');
+    ctx.save();
+    ctx.translate(cx + offsetX, cy + offsetY);
+    ctx.rotate(-0.42);
+    ctx.scale(scaleX, scaleY);
+    ctx.translate(-(cx + offsetX), -(cy + offsetY));
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.ellipse(cx + offsetX, cy + offsetY, 96, 58, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  };
+
+  ctx.filter = 'blur(8px)';
+  drawDisk(0.23, 1.44, 0.5);
+  drawDisk(0.16, 1.18, 0.42, -12, 8);
+  drawDisk(0.1, 1.64, 0.36, 18, -8);
+
+  ctx.filter = 'blur(3px)';
+  for (let lane = 0; lane < 4; lane += 1) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.translate(cx, cy);
+    ctx.rotate(-0.48 + lane * 0.06);
+    ctx.scale(1.54, 0.42);
+    ctx.translate(-cx, -cy);
+    const y = cy + (lane - 1.4) * 16;
+    const laneGradient = ctx.createLinearGradient(cx - 112, y, cx + 112, y + 18);
+    laneGradient.addColorStop(0, 'rgba(0,0,0,0)');
+    laneGradient.addColorStop(0.42, `rgba(0,0,0,${0.12 + lane * 0.035})`);
+    laneGradient.addColorStop(0.66, `rgba(0,0,0,${0.18 + lane * 0.028})`);
+    laneGradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = laneGradient;
+    ctx.fillRect(cx - 120, y - 7, 240, 14);
+    ctx.restore();
+  }
+
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.filter = 'blur(1px)';
+  const core = ctx.createRadialGradient(cx - 7, cy + 4, 0, cx - 7, cy + 4, 30);
+  core.addColorStop(0, 'rgba(255,255,246,0.72)');
+  core.addColorStop(0.22, 'rgba(255,244,214,0.42)');
+  core.addColorStop(0.58, 'rgba(178,220,255,0.16)');
+  core.addColorStop(1, 'rgba(178,220,255,0)');
+  ctx.fillStyle = core;
+  ctx.fillRect(cx - 38, cy - 34, 76, 76);
+
+  ctx.filter = 'none';
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  return texture;
+}
+
 function makeNodeLabelTexture(name: string) {
   const text = Array.from(name).slice(0, 5).join('');
   const canvas = document.createElement('canvas');
@@ -273,8 +380,38 @@ function makeNodeLabelTexture(name: string) {
   return texture;
 }
 
+function makeCommunityLabelTexture(name: string, count: unknown) {
+  const title = Array.from(name.replace(/^社交关系大图\s*|^企业\/风控关系图\s*/g, '')).slice(0, 6).join('');
+  const subtitle = `${Number(count ?? 0).toLocaleString()} nodes`;
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 78;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(11,16,32,0.92)';
+  ctx.shadowBlur = 14;
+  ctx.font = '700 21px Inter, "PingFang SC", sans-serif';
+  ctx.fillStyle = 'rgba(249,250,251,0.92)';
+  ctx.fillText(title, canvas.width / 2, 30);
+  ctx.font = '500 14px Inter, "PingFang SC", sans-serif';
+  ctx.fillStyle = 'rgba(191,201,217,0.72)';
+  ctx.fillText(subtitle, canvas.width / 2, 55);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  return texture;
+}
+
 function vecFromNode(node: NodePosition) {
   return new THREE.Vector3(node.x, node.y, node.z);
+}
+
+function isCommunityNode(node: GraphNode) {
+  return node.type === '社区' || node.id.startsWith('community:');
 }
 
 function hashString(value: string) {
@@ -326,23 +463,38 @@ function midpointCurve(
   const distance = start.distanceTo(end);
 
   const seed = `${options.key}-${source.id}-${target.id}`;
-  const bendSign = hashUnit(`${seed}-bend`) > 0.5 ? 1 : -1;
-  const depthSign = hashUnit(`${seed}-depth-sign`) > 0.46 ? 1 : -1;
   const distanceFactor = THREE.MathUtils.clamp(distance / 430, 0.36, 1.34);
   const weightFactor = THREE.MathUtils.clamp(1.15 - (options.weight ?? 30) / 180, 0.62, 1.08);
   const focusFactor = options.active ? 0.72 : 1;
   const lift = options.lift ?? 1;
 
-  const planarNormal = new THREE.Vector3(-direction.y, direction.x, 0);
-  if (planarNormal.lengthSq() < 0.0001) {
-    planarNormal.set(1, 0, 0);
+  const directionNormal = direction.clone().normalize();
+  const randomVector = new THREE.Vector3(
+    hashUnit(`${seed}-bend-x`) * 2 - 1,
+    hashUnit(`${seed}-bend-y`) * 2 - 1,
+    (hashUnit(`${seed}-bend-z`) * 2 - 1) * 1.35
+  );
+  randomVector.sub(directionNormal.clone().multiplyScalar(randomVector.dot(directionNormal)));
+  if (randomVector.lengthSq() < 0.0001) {
+    randomVector.crossVectors(directionNormal, new THREE.Vector3(0, 0, 1));
   }
-  planarNormal.normalize();
+  if (randomVector.lengthSq() < 0.0001) {
+    randomVector.crossVectors(directionNormal, new THREE.Vector3(0, 1, 0));
+  }
+  randomVector.normalize();
 
-  const bendAmount = (24 + distance * 0.15) * distanceFactor * weightFactor * focusFactor;
-  const depthAmount = (28 + distance * 0.055) * lift * (0.74 + hashUnit(`${seed}-depth`) * 0.52);
-  mid.add(planarNormal.multiplyScalar(bendAmount * bendSign));
-  mid.z += depthAmount * depthSign;
+  const radialVector = mid.clone();
+  if (radialVector.lengthSq() > 0.0001) {
+    radialVector.normalize();
+    radialVector.sub(directionNormal.clone().multiplyScalar(radialVector.dot(directionNormal)));
+    if (radialVector.lengthSq() > 0.0001) {
+      radialVector.normalize();
+      randomVector.lerp(radialVector, 0.22 + hashUnit(`${seed}-radial-mix`) * 0.18).normalize();
+    }
+  }
+
+  const bendAmount = (22 + distance * 0.18) * distanceFactor * weightFactor * focusFactor * lift;
+  mid.add(randomVector.multiplyScalar(bendAmount));
 
   return new THREE.CatmullRomCurve3([start, mid, end]);
 }
@@ -366,10 +518,11 @@ function createFitView(
   const box = new THREE.Box3().setFromPoints(points);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
-  const vertical = Math.max(size.y, size.x / Math.max(aspect, 0.1), minFrame);
+  const spriteMargin = Math.max(28, Math.min(88, padding * 36));
+  const vertical = Math.max(size.y + spriteMargin, (size.x + spriteMargin) / Math.max(aspect, 0.1), minFrame);
   const fovRadians = THREE.MathUtils.degToRad(fov);
   const distance = (vertical * padding) / (2 * Math.tan(fovRadians / 2));
-  const depthAllowance = Math.max(0, size.z * 0.42);
+  const depthAllowance = Math.max(0, size.z * 0.5);
   return {
     center,
     cameraZ: THREE.MathUtils.clamp(distance + depthAllowance, minCameraZ, maxCameraZ)
@@ -377,35 +530,48 @@ function createFitView(
 }
 
 function overviewPadding(nodeCount: number) {
-  return THREE.MathUtils.clamp(1.72 + nodeCount / 650, 1.82, 2.24);
+  return THREE.MathUtils.clamp(1.08 + nodeCount / 2600, 1.1, 1.28);
 }
 
 function focusPadding(nodeCount: number) {
-  return THREE.MathUtils.clamp(0.96 + nodeCount / 520, 1.02, 1.36);
+  return THREE.MathUtils.clamp(1.14 + nodeCount / 620, 1.18, 1.4);
 }
 
 type FitChoice = FitView & {
   rotation: THREE.Euler;
+  score: number;
+};
+
+type AutoFrameOptions = {
+  padding: number;
+  minFrame: number;
+  minCameraZ: number;
+  maxCameraZ?: number;
+  preferDepth?: number;
+  rotationDamping?: number;
 };
 
 function rotationCandidates(currentRotation: THREE.Euler) {
   const baseY = currentRotation.y;
   const candidates: THREE.Euler[] = [];
-  const xAngles = [-0.52, -0.42, -0.32, -0.22, -0.12];
+  const xAngles = [-0.62, -0.52, -0.42, -0.32, -0.22, -0.12, 0.02];
   const yAngles = [
-    baseY - 0.82,
-    baseY - 0.56,
-    baseY - 0.32,
-    baseY - 0.14,
+    baseY - 1.08,
+    baseY - 0.78,
+    baseY - 0.52,
+    baseY - 0.28,
     baseY,
-    baseY + 0.14,
-    baseY + 0.32,
-    baseY + 0.56,
-    baseY + 0.82,
+    baseY + 0.28,
+    baseY + 0.52,
+    baseY + 0.78,
+    baseY + 1.08,
+    0,
     0.42,
-    -0.42
+    -0.42,
+    0.78,
+    -0.78
   ];
-  const zAngles = [-0.06, 0, 0.04];
+  const zAngles = [-0.1, -0.04, 0, 0.04, 0.1];
 
   xAngles.forEach((x) => {
     yAngles.forEach((y) => {
@@ -416,47 +582,76 @@ function rotationCandidates(currentRotation: THREE.Euler) {
   return candidates;
 }
 
-function fitScore(nodes: NodePosition[], rotation: THREE.Euler, fit: FitView, aspect: number, scale: number) {
+function rotationDistance(a: THREE.Euler, b: THREE.Euler) {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) * 0.7 + Math.abs(a.z - b.z) * 0.42;
+}
+
+function fitScore(nodes: NodePosition[], rotation: THREE.Euler, fit: FitView, aspect: number, scale: number, currentRotation: THREE.Euler, options: AutoFrameOptions) {
   const points = nodes.map((node) => vecFromNode(node).applyEuler(rotation).multiplyScalar(scale));
   const box = new THREE.Box3().setFromPoints(points);
   const size = box.getSize(new THREE.Vector3());
   const width = Math.max(size.x, 1);
   const height = Math.max(size.y, 1);
   const depth = Math.max(size.z, 1);
+  const frame = Math.max(width / Math.max(aspect, 0.1), height, options.minFrame);
   const projectedAspect = Math.max(width / Math.max(aspect, 0.1), height) / Math.max(1, Math.min(width / Math.max(aspect, 0.1), height));
-  const aspectPenalty = Math.abs(Math.log(projectedAspect)) * 90;
-  const depthPenalty = depth * 0.16;
-  return fit.cameraZ + aspectPenalty + depthPenalty;
+  const aspectPenalty = Math.abs(Math.log(projectedAspect)) * 120;
+  const flatnessPenalty = depth < frame * 0.18 ? (frame * 0.18 - depth) * 0.34 : 0;
+  const depthReward = Math.min(depth, frame * 1.35) * (options.preferDepth ?? 0.12);
+  const rotationPenalty = rotationDistance(rotation, currentRotation) * (options.rotationDamping ?? 18);
+  return fit.cameraZ + aspectPenalty + flatnessPenalty + rotationPenalty - depthReward;
 }
 
-function chooseBestFitView(
+function chooseAutoFrameView(
   nodes: NodePosition[],
   currentRotation: THREE.Euler,
   aspect: number,
   fov: number,
   scale: number,
-  options: { padding: number; minFrame: number; minCameraZ: number }
+  options: AutoFrameOptions
 ): FitChoice {
   if (nodes.length === 0) {
-    return { center: new THREE.Vector3(), cameraZ: 720, rotation: currentRotation.clone() };
+    return { center: new THREE.Vector3(), cameraZ: 720, rotation: currentRotation.clone(), score: 0 };
   }
 
   const candidates = nodes.length < 3 ? [currentRotation.clone(), DEFAULT_ROOT_ROTATION.clone()] : rotationCandidates(currentRotation);
   return candidates.reduce<FitChoice | undefined>((best, rotation) => {
-    const fit = createFitView(nodes, rotation, aspect, fov, scale, options.padding, options.minFrame, options.minCameraZ);
-    const choice = { ...fit, rotation };
+    const fit = createFitView(nodes, rotation, aspect, fov, scale, options.padding, options.minFrame, options.minCameraZ, options.maxCameraZ ?? MAX_CAMERA_Z);
+    const choice = { ...fit, rotation, score: fitScore(nodes, rotation, fit, aspect, scale, currentRotation, options) };
     if (!best) return choice;
-    return fitScore(nodes, rotation, fit, aspect, scale) < fitScore(nodes, best.rotation, best, aspect, scale) ? choice : best;
+    return choice.score < best.score ? choice : best;
   }, undefined)!;
 }
 
+const chooseBestFitView = chooseAutoFrameView;
+
+function graphDataSignature(data: GraphData) {
+  const firstNode = data.nodes[0]?.id ?? '';
+  const lastNode = data.nodes[data.nodes.length - 1]?.id ?? '';
+  const firstEdge = data.edges[0]?.id ?? `${data.edges[0]?.source ?? ''}:${data.edges[0]?.target ?? ''}`;
+  return `${data.nodes.length}:${data.edges.length}:${firstNode}:${lastNode}:${firstEdge}`;
+}
+
 function representativeOverviewNodes(nodes: NodePosition[], edges: GraphData['edges']) {
-  if (nodes.length <= 160) return nodes;
+  if (nodes.length <= 1200) return nodes;
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-  return rankCoreNodes({ nodes, edges })
+  const ranked = rankCoreNodes({ nodes, edges })
     .map((item) => nodeMap.get(item.node.id))
     .filter((node): node is NodePosition => Boolean(node))
-    .slice(0, 160);
+    .slice(0, 420);
+  const extremes = [
+    [...nodes].sort((a, b) => a.x - b.x).slice(0, 28),
+    [...nodes].sort((a, b) => b.x - a.x).slice(0, 28),
+    [...nodes].sort((a, b) => a.y - b.y).slice(0, 28),
+    [...nodes].sort((a, b) => b.y - a.y).slice(0, 28),
+    [...nodes].sort((a, b) => a.z - b.z).slice(0, 28),
+    [...nodes].sort((a, b) => b.z - a.z).slice(0, 28)
+  ].flat();
+  return Array.from(new Map([...ranked, ...extremes].map((node) => [node.id, node])).values());
+}
+
+function isCommunityView(data: GraphData) {
+  return data.nodes.length > 0 && data.nodes.every(isCommunityNode);
 }
 
 export function NebulaGraph({
@@ -481,6 +676,8 @@ export function NebulaGraph({
   const visibleRelations = useMemo(() => new Set(relationTypes), [relationTypes]);
   const layout = useMemo(() => createForceLayout(data), [data]);
   const nodeTierIndex = useMemo(() => buildNodeTierIndex(data), [data]);
+  const communityView = useMemo(() => isCommunityView(data), [data]);
+  const dataSignature = useMemo(() => graphDataSignature(data), [data]);
 
   useEffect(() => {
     selectedRef.current = selectedNodeId;
@@ -507,9 +704,12 @@ export function NebulaGraph({
         runtime.cameraFov,
         runtime.root.scale.x,
         {
-          padding: Math.max(1.08, focusPadding(pathNodes.length)),
-          minFrame: 430,
-          minCameraZ: 520
+          padding: Math.max(1.22, focusPadding(pathNodes.length)),
+          minFrame: 520,
+          minCameraZ: communityView ? 620 : 640,
+          maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
+          preferDepth: 0.18,
+          rotationDamping: 9
         }
       );
       focusTargetRef.current = {
@@ -540,8 +740,11 @@ export function NebulaGraph({
       runtime.root.scale.x,
       {
         padding: focusPadding(focusNodes.length),
-        minFrame: 480,
-        minCameraZ: 560
+        minFrame: 560,
+        minCameraZ: communityView ? 620 : 660,
+        maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
+        preferDepth: communityView ? 0.18 : 0.13,
+        rotationDamping: 10
       }
     );
     focusTargetRef.current = {
@@ -551,7 +754,7 @@ export function NebulaGraph({
       rotation: focusFit.rotation,
       active: true
     };
-  }, [data, focusedNodeId, highlightedPath, selectedNodeId]);
+  }, [communityView, data, focusedNodeId, highlightedPath, selectedNodeId]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -560,9 +763,10 @@ export function NebulaGraph({
     const scene = new THREE.Scene();
     scene.fog = new THREE.FogExp2(nebulaTheme.background.fog, 0.00072);
 
-    const cameraFov = 48;
+    const cameraFov = communityView ? 53 : 48;
     const camera = new THREE.PerspectiveCamera(cameraFov, mount.clientWidth / mount.clientHeight, 1, 4200);
-    camera.position.set(0, CAMERA_Y_OFFSET, viewStateRef.current?.cameraZ ?? 720);
+    const savedView = viewStateRef.current?.dataSignature === dataSignature ? viewStateRef.current : undefined;
+    camera.position.set(0, CAMERA_Y_OFFSET, savedView?.cameraZ ?? (communityView ? 780 : 720));
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -572,24 +776,38 @@ export function NebulaGraph({
     onCanvasReady?.(renderer.domElement);
 
     const root = new THREE.Group();
-    root.position.copy(viewStateRef.current?.rootPosition ?? new THREE.Vector3(0, 0, 0));
-    root.rotation.copy(viewStateRef.current?.rootRotation ?? DEFAULT_ROOT_ROTATION);
-    root.scale.setScalar(viewStateRef.current?.rootScale ?? 0.88);
+    root.position.copy(savedView?.rootPosition ?? new THREE.Vector3(0, 0, 0));
+    root.rotation.copy(savedView?.rootRotation ?? (communityView ? COMMUNITY_ROOT_ROTATION : DEFAULT_ROOT_ROTATION));
+    root.scale.setScalar(savedView?.rootScale ?? (communityView ? 0.86 : 0.88));
     scene.add(root);
 
-    if (!viewStateRef.current) {
-      const initialFit = createFitView(
-        layout,
-        root.rotation,
+    if (!savedView) {
+      const initialFit = chooseAutoFrameView(
+        representativeOverviewNodes(layout, data.edges),
+        communityView ? COMMUNITY_ROOT_ROTATION : root.rotation,
         camera.aspect,
         cameraFov,
         root.scale.x,
-        overviewPadding(layout.length),
-        360,
-        720
+        {
+          padding: overviewPadding(layout.length),
+          minFrame: communityView ? 400 : 360,
+          minCameraZ: communityView ? 520 : 500,
+          maxCameraZ: communityView ? 1380 : MAX_CAMERA_Z,
+          preferDepth: communityView ? 0.16 : 0.11,
+          rotationDamping: 6
+        }
       );
-      root.position.set(-initialFit.center.x, -initialFit.center.y, -initialFit.center.z * 0.18);
-      camera.position.z = initialFit.cameraZ;
+      root.rotation.copy(initialFit.rotation);
+      root.position.set(-initialFit.center.x, -initialFit.center.y, -initialFit.center.z * (communityView ? 0.3 : 0.18));
+      const introCameraZ = Math.min(MAX_CAMERA_Z, Math.max(initialFit.cameraZ + 42, initialFit.cameraZ * 1.16));
+      camera.position.z = introCameraZ;
+      focusTargetRef.current = {
+        id: `initial-${dataSignature}`,
+        center: initialFit.center,
+        cameraZ: initialFit.cameraZ,
+        rotation: initialFit.rotation,
+        active: true
+      };
     }
 
     const ambient = new THREE.AmbientLight(0xbfc9d9, 0.74);
@@ -619,6 +837,8 @@ export function NebulaGraph({
     const starburstTexture = makeStarburstTexture();
     const starCoreTexture = makeStarCoreTexture();
     const hotCoreTexture = makeHotCoreTexture();
+    const rippleTexture = makeRippleTexture();
+    const communityRegionTexture = makeCommunityRegionTexture();
     const stars = new THREE.Points(
       starGeo,
       new THREE.PointsMaterial({
@@ -667,7 +887,9 @@ export function NebulaGraph({
       layout
     };
     const activeIds = neighborIds(data, selectedNodeId, 1);
+    const hoverIds = new Set<string>();
     const hasSelection = Boolean(selectedNodeId);
+    const hasHover = false;
     const pathEdgeKeys = edgeSignatureSet(highlightedPath?.edges);
     const pathNodeIds = new Set(highlightedPath?.nodes.map((node) => node.id) ?? []);
     const hasPath = pathEdgeKeys.size > 0;
@@ -693,6 +915,12 @@ export function NebulaGraph({
       focusDetailIds.add(edge.target);
     });
     pathNodeIds.forEach((id) => focusDetailIds.add(id));
+    const communityEdgeCounts = new Map<string, number>();
+    data.edges.forEach((edge) => {
+      const count = Number(edge.properties?.edge_count ?? edge.weight ?? 1);
+      communityEdgeCounts.set(edge.source, (communityEdgeCounts.get(edge.source) ?? 0) + count);
+      communityEdgeCounts.set(edge.target, (communityEdgeCounts.get(edge.target) ?? 0) + count);
+    });
 
     const visibleEdges = largeGraph
       ? hasSelection
@@ -718,8 +946,11 @@ export function NebulaGraph({
         root.scale.x,
         {
           padding: Math.max(1.08, focusPadding(pathNodes.length)),
-          minFrame: 430,
-          minCameraZ: 520
+          minFrame: communityView ? 400 : 380,
+          minCameraZ: communityView ? 500 : 500,
+          maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
+          preferDepth: 0.18,
+          rotationDamping: 9
         }
       );
       focusTargetRef.current = {
@@ -741,8 +972,11 @@ export function NebulaGraph({
         root.scale.x,
         {
           padding: focusPadding(focusNodes.length),
-          minFrame: 480,
-          minCameraZ: 560
+          minFrame: communityView ? 420 : 400,
+          minCameraZ: communityView ? 500 : 520,
+          maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
+          preferDepth: communityView ? 0.18 : 0.13,
+          rotationDamping: 10
         }
       );
       focusTargetRef.current = {
@@ -829,6 +1063,8 @@ export function NebulaGraph({
       }
       const edgeStyle = edgeStyleForWeight(edge.weight ?? 1);
       const baseColor = new THREE.Color(edgeStyle.color);
+      const aggregateEdgeCount = Number(edge.properties?.edge_count ?? 0);
+      const isAggregateCommunityEdge = edge.relation_type === '跨社区关系';
       const key = `${graphEdgeKey(edge)}-${edgeIndex}`;
       const isPathEdge = edgeMatchesSignatures(edge, pathEdgeKeys);
       if (hasPath && isPathEdge) return;
@@ -836,15 +1072,40 @@ export function NebulaGraph({
       const pathParticleColor = new THREE.Color(nebulaTheme.path.particle);
       const isActive = hasPath
         ? isPathEdge
+        : hasHover
+          ? edgeTouches(edge, hoverIds)
         : largeGraph && hasSelection
           ? focusEdgeRefs.has(edge)
           : !hasSelection || edgeTouches(edge, activeIds);
       const color = hasPath && isPathEdge ? pathParticleColor : baseColor;
-      const lineColor = hasPath && isPathEdge ? analysisColor : hasPath ? baseColor.clone().lerp(new THREE.Color(0x475569), 0.5) : baseColor;
+      const aggregateStrength = THREE.MathUtils.clamp(Math.log1p(aggregateEdgeCount) / 4.4, 0, 1);
+      const aggregateColor = new THREE.Color('#65D6FF').lerp(new THREE.Color('#FFD54F'), aggregateStrength * 0.58);
+      const focusedAggregateColor =
+        isAggregateCommunityEdge && isActive && (hasSelection || hasPath)
+          ? aggregateColor.clone().lerp(new THREE.Color('#FFE8D6'), 0.42)
+          : aggregateColor;
+      const lineColor = hasPath && isPathEdge
+        ? analysisColor
+        : hasPath
+          ? baseColor.clone().lerp(new THREE.Color(0x475569), 0.5)
+          : isAggregateCommunityEdge
+            ? focusedAggregateColor
+            : baseColor;
+      const aggregateOpacity = isAggregateCommunityEdge
+        ? hasPath || hasSelection
+          ? isActive
+            ? 0.64 + aggregateStrength * 0.28
+            : 0.024
+        : hasHover
+          ? isActive
+            ? 0.48 + aggregateStrength * 0.24
+            : 0.026
+          : 0.07 + aggregateStrength * 0.13
+        : Math.min(edgeOpacity(isActive), edgeStyle.opacity + (isActive ? 0.2 : 0));
       const material = new THREE.LineBasicMaterial({
         color: lineColor,
         transparent: true,
-        opacity: hasPath && isPathEdge ? edgeOpacity(isActive) : Math.min(edgeOpacity(isActive), edgeStyle.opacity + (isActive ? 0.2 : 0)),
+        opacity: hasPath && isPathEdge ? edgeOpacity(isActive) : aggregateOpacity,
         blending: THREE.AdditiveBlending,
         depthWrite: false
       });
@@ -993,9 +1254,10 @@ export function NebulaGraph({
 
     if (largeGraph) {
       const pointGeometry = new THREE.BufferGeometry();
-      const pointPositions = new Float32Array(layout.length * 3);
-      const pointColors = new Float32Array(layout.length * 3);
-      layout.forEach((node, index) => {
+      const pointNodes = layout.filter((node) => !isCommunityNode(node));
+      const pointPositions = new Float32Array(pointNodes.length * 3);
+      const pointColors = new Float32Array(pointNodes.length * 3);
+      pointNodes.forEach((node, index) => {
         const tier = nodeTierIndex.get(node.id) ?? 'tertiary';
         const tierStyle = nodeStyleForTier(tier);
         const color = new THREE.Color(tierStyle.color).lerp(new THREE.Color(tierStyle.glow), tier === 'core' ? 0.18 : 0.28);
@@ -1021,19 +1283,179 @@ export function NebulaGraph({
           depthWrite: false
         })
       );
-      nodePoints.userData.nodes = layout;
+      nodePoints.userData.nodes = pointNodes;
       nodePoints.renderOrder = 5;
       nodeGroup.add(nodePoints);
       raycastTargets.push(nodePoints);
     }
 
-    layout.forEach((node) => {
+    const communityDustPositions: number[] = [];
+    const communityDustColors: number[] = [];
+    const communityStarPositions: number[] = [];
+    const communityStarColors: number[] = [];
+
+    layout.forEach((node, nodeIndex) => {
       const shouldRenderDetailedNode =
         !largeGraph || (hasPath && pathNodeIds.has(node.id)) || (hasSelection && focusDetailIds.has(node.id)) || (!hasSelection && (node.weight ?? 0) >= 82);
       if (!shouldRenderDetailedNode) return;
 
+      if (false && isCommunityNode(node)) {
+        const nodeCount = Number(node.properties?.node_count ?? 0);
+        const importance = Number(node.properties?.importance_score ?? (node.weight ?? 20) / 100);
+        const incidentEdgeCount = communityEdgeCounts.get(node.id) ?? 1;
+        const communityRadius = THREE.MathUtils.clamp(34 + Math.log1p(Math.max(1, nodeCount)) * 7.8 + importance * 24, 68, 126);
+        const position = vecFromNode(node);
+        const cloudColor = new THREE.Color('#65D6FF').lerp(new THREE.Color('#FFD54F'), THREE.MathUtils.clamp((importance - 0.72) * 1.6, 0, 0.72));
+        const prominentCommunity = nodeIndex < 36 || (node.weight ?? 0) >= 98;
+        const isHoverActive = hasHover && hoverIds.has(node.id);
+        const activeOpacity = hasSelection || hasPath
+          ? activeIds.has(node.id) || pathNodeIds.has(node.id)
+            ? 0.3
+            : 0.045
+          : hasHover
+            ? isHoverActive
+              ? 0.38
+              : 0.035
+            : prominentCommunity
+              ? 0.24
+              : 0.075;
+
+        const hitMesh = new THREE.Mesh(
+          new THREE.SphereGeometry(communityRadius * 0.58, 18, 12),
+          makeHitMaterial()
+        ) as unknown as NodeMesh;
+        hitMesh.position.copy(position);
+        hitMesh.userData.node = node;
+        hitMesh.renderOrder = 8;
+        nodeGroup.add(hitMesh);
+        nodeMeshes.push(hitMesh);
+        raycastTargets.push(hitMesh);
+
+        const halo = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: communityRegionTexture,
+            color: cloudColor,
+            transparent: true,
+            opacity: activeOpacity,
+              blending: THREE.AdditiveBlending,
+            depthTest: false,
+            depthWrite: false
+          })
+        );
+        const haloScaleX = communityRadius * (2.15 + hashUnit(`${node.id}-region-wide`) * 0.42);
+        const haloScaleY = communityRadius * (1.06 + hashUnit(`${node.id}-region-thin`) * 0.18);
+        halo.scale.set(haloScaleX, haloScaleY, 1);
+        halo.position.copy(position).add(new THREE.Vector3(0, 0, -4));
+        const galaxyRotation = hashUnit(`${node.id}-region-rot`) * Math.PI;
+        halo.rotation.z = galaxyRotation;
+        halo.renderOrder = 4;
+        halo.userData = {
+          baseScaleX: haloScaleX,
+          baseScaleY: haloScaleY,
+          phase: hashUnit(`${node.id}-region-phase`) * Math.PI * 2,
+          spin: (hashUnit(`${node.id}-region-spin`) - 0.5) * 0.00012
+        };
+        nodeGroup.add(halo);
+
+        const coreSize = THREE.MathUtils.clamp(5 + importance * 5 + (node.weight ?? 20) / 22, 8, 14);
+        const core = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: starCoreTexture,
+            color: cloudColor,
+            transparent: true,
+            opacity: hasHover ? (isHoverActive ? 0.82 : 0.22) : 0.56,
+            blending: THREE.AdditiveBlending,
+            depthTest: false,
+            depthWrite: false
+          })
+        );
+        core.scale.set(coreSize, coreSize, 1);
+        core.position.copy(position).add(new THREE.Vector3(0, 0, 8));
+        core.renderOrder = 8;
+        core.userData = { baseScale: coreSize, phase: hashUnit(`${node.id}-core-phase`) * Math.PI * 2 };
+        nodeGroup.add(core);
+
+        const hotCore = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: hotCoreTexture,
+            color: importance > 0.94 ? new THREE.Color('#FFF2A8') : new THREE.Color('#F0FBFF'),
+            transparent: true,
+            opacity: hasHover ? (isHoverActive ? 0.72 : 0.12) : 0.42,
+            blending: THREE.AdditiveBlending,
+            depthTest: false,
+            depthWrite: false
+          })
+        );
+        hotCore.scale.set(coreSize * 0.56, coreSize * 0.56, 1);
+        hotCore.position.copy(position).add(new THREE.Vector3(0, 0, 10));
+        hotCore.renderOrder = 9;
+        hotCore.userData = { baseScale: coreSize * 0.56, phase: hashUnit(`${node.id}-hot-phase`) * Math.PI * 2 };
+        nodeGroup.add(hotCore);
+
+        const dustCount = prominentCommunity || isHoverActive
+          ? Math.round(THREE.MathUtils.clamp(Math.log1p(incidentEdgeCount) * (isHoverActive ? 7 : 4), 12, isHoverActive ? 42 : 26))
+          : 0;
+        if (dustCount > 0) {
+          for (let index = 0; index < dustCount; index += 1) {
+            const angle = hashUnit(`${node.id}-dust-angle-${index}`) * Math.PI * 2;
+            const radius = communityRadius * (0.18 + hashUnit(`${node.id}-dust-radius-${index}`) * 0.76);
+            const ySquash = 0.38 + hashUnit(`${node.id}-dust-squash-${index}`) * 0.22;
+            const localX = Math.cos(angle) * radius;
+            const localY = Math.sin(angle) * radius * ySquash;
+            const rotatedX = localX * Math.cos(galaxyRotation) - localY * Math.sin(galaxyRotation);
+            const rotatedY = localX * Math.sin(galaxyRotation) + localY * Math.cos(galaxyRotation);
+            communityDustPositions.push(
+              position.x + rotatedX,
+              position.y + rotatedY,
+              position.z + (hashUnit(`${node.id}-dust-z-${index}`) - 0.5) * 34 + 4
+            );
+            const dustColor = new THREE.Color('#DDE5F3').lerp(cloudColor, 0.42 + hashUnit(`${node.id}-dust-color-${index}`) * 0.28);
+            communityDustColors.push(dustColor.r, dustColor.g, dustColor.b);
+          }
+        }
+
+        const starCount = Math.round(THREE.MathUtils.clamp(3 + importance * 5 + (isHoverActive ? 7 : 0), 3, isHoverActive ? 16 : prominentCommunity ? 9 : 5));
+        for (let index = 0; index < starCount; index += 1) {
+          const angle = hashUnit(`${node.id}-star-angle-${index}`) * Math.PI * 2;
+          const radius = communityRadius * (0.12 + hashUnit(`${node.id}-star-radius-${index}`) * 0.48);
+          const ySquash = 0.52 + hashUnit(`${node.id}-star-squash-${index}`) * 0.18;
+          const localX = Math.cos(angle) * radius;
+          const localY = Math.sin(angle) * radius * ySquash;
+          const rotatedX = localX * Math.cos(galaxyRotation) - localY * Math.sin(galaxyRotation);
+          const rotatedY = localX * Math.sin(galaxyRotation) + localY * Math.cos(galaxyRotation);
+          communityStarPositions.push(
+            position.x + rotatedX,
+            position.y + rotatedY,
+            position.z + (hashUnit(`${node.id}-star-z-${index}`) - 0.5) * 26 + 8
+          );
+          const starColor = new THREE.Color(index < 2 ? '#FFF2A8' : '#DDE5F3').lerp(cloudColor, 0.34);
+          communityStarColors.push(starColor.r, starColor.g, starColor.b);
+        }
+
+        if (isHoverActive || nodeIndex < 18 || (node.weight ?? 0) >= 98.6 || layout.length <= 36) {
+          const labelTexture = makeCommunityLabelTexture(node.name, node.properties?.node_count);
+          const label = new THREE.Sprite(
+            new THREE.SpriteMaterial({
+              map: labelTexture,
+              transparent: true,
+              opacity: hasSelection || hasPath ? 0.38 : hasHover ? (isHoverActive ? 0.92 : 0.18) : 0.72,
+              depthTest: false,
+              depthWrite: false
+            })
+          );
+          label.scale.set(66, 21, 1);
+          label.position.copy(position).add(new THREE.Vector3(0, communityRadius * 0.82, 10));
+          label.renderOrder = 10;
+          label.userData = { baseScale: 66, labelAspect: 3.14, phase: hashUnit(`${node.id}-label`) * Math.PI * 2 };
+          nodeGroup.add(label);
+        }
+
+        return;
+      }
+
       const tier = nodeTierIndex.get(node.id) ?? 'tertiary';
       const tierStyle = nodeStyleForTier(tier);
+      const communityNode = isCommunityNode(node);
       const isActive = hasPath
         ? pathNodeIds.has(node.id)
         : largeGraph && hasSelection
@@ -1043,20 +1465,16 @@ export function NebulaGraph({
       const glowColor = isPathNode ? new THREE.Color(nebulaTheme.path.nodeGlow) : new THREE.Color(tierStyle.glow);
       const bodyColor = isPathNode ? new THREE.Color(nebulaTheme.path.nodeCore) : new THREE.Color(tierStyle.color);
       const coreColor = isPathNode ? new THREE.Color(nebulaTheme.path.nodeCore) : new THREE.Color(tierStyle.core);
-      const baseRadius = Math.max(6.4, Math.min(15.2, 5.7 + (node.weight ?? 20) / 9.5));
-      const tierScale = tier === 'core' ? 1.18 : tier === 'primary' ? 1.1 : tier === 'special' ? 1.08 : 1;
+      const baseRadius = Math.max(6.4, Math.min(communityNode ? 18 : 15.2, 5.7 + (node.weight ?? 20) / (communityNode ? 8.2 : 9.5)));
+      const tierScale = communityNode ? 1.16 : tier === 'core' ? 1.18 : tier === 'primary' ? 1.1 : tier === 'special' ? 1.08 : 1;
       const radius = baseRadius * tierScale * (isActive && (hasSelection || hasPath) ? 1.16 : 1);
       const inactiveOpacity = hasSelection || hasPath ? nebulaTheme.interaction.unrelatedNodeOpacity : 0.2;
       const starburstOpacity = isActive ? (hasPath ? 0.8 : 0.68) : inactiveOpacity;
       const coreOpacity = isActive ? (hasPath ? 0.92 : 0.78) : Math.max(0.1, inactiveOpacity * 1.4);
       const hotCoreOpacity = isActive ? (hasPath ? 0.96 : 0.84) : Math.max(0.12, inactiveOpacity * 1.6);
-      const material = new THREE.MeshBasicMaterial({
-        color: bodyColor,
-        transparent: true,
-        opacity: 0,
-        depthWrite: false
-      });
-      const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 24, 24), material) as unknown as NodeMesh;
+      const material = makeHitMaterial();
+      const hitRadius = radius * (communityNode ? 1.62 : 1.55);
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(hitRadius, 24, 24), material) as unknown as NodeMesh;
       mesh.position.copy(vecFromNode(node));
       mesh.userData.node = node;
       mesh.renderOrder = 8;
@@ -1082,7 +1500,9 @@ export function NebulaGraph({
       starburst.userData = {
         baseScale: burstScale,
         phase: Math.random() * Math.PI * 2,
-        spin: 0.0009 + Math.random() * 0.0008
+        spin: communityNode ? 0.00035 + Math.random() * 0.00035 : 0.0009 + Math.random() * 0.0008,
+        pulseSpeed: communityNode ? 0.72 : 1.8,
+        pulseAmp: communityNode ? 0.035 : 0.055
       };
       nodeGroup.add(starburst);
 
@@ -1100,7 +1520,7 @@ export function NebulaGraph({
       core.scale.set(radius * 1.86, radius * 1.86, 1);
       core.position.copy(mesh.position);
       core.renderOrder = 7;
-      core.userData = { baseScale: radius * 1.86, phase: Math.random() * Math.PI * 2 };
+      core.userData = { baseScale: radius * 1.86, phase: Math.random() * Math.PI * 2, pulseSpeed: communityNode ? 0.72 : 1.8, pulseAmp: communityNode ? 0.032 : 0.055 };
       nodeGroup.add(core);
 
       const hotCore = new THREE.Sprite(
@@ -1118,8 +1538,36 @@ export function NebulaGraph({
       hotCore.scale.set(hotCoreScale, hotCoreScale, 1);
       hotCore.position.copy(mesh.position);
       hotCore.renderOrder = 8;
-      hotCore.userData = { baseScale: hotCoreScale, phase: Math.random() * Math.PI * 2 };
+      hotCore.userData = { baseScale: hotCoreScale, phase: Math.random() * Math.PI * 2, pulseSpeed: communityNode ? 0.72 : 1.8, pulseAmp: communityNode ? 0.03 : 0.055 };
       nodeGroup.add(hotCore);
+
+      if (communityNode && (nodeIndex < 16 || (node.weight ?? 0) >= 98.8)) {
+        for (let rippleIndex = 0; rippleIndex < 1; rippleIndex += 1) {
+          const rippleMaterial = new THREE.SpriteMaterial({
+            map: rippleTexture,
+            color: glowColor,
+            transparent: true,
+            opacity: 0,
+            blending: THREE.AdditiveBlending,
+            depthTest: false,
+            depthWrite: false
+          });
+          const ripple = new THREE.Sprite(rippleMaterial);
+          const rippleBase = radius * 2.35;
+          ripple.scale.set(rippleBase, rippleBase, 1);
+          ripple.position.copy(mesh.position).add(new THREE.Vector3(0, 0, 5 + rippleIndex));
+          ripple.renderOrder = 5;
+          ripple.userData = {
+            ripple: true,
+            baseScale: rippleBase,
+            maxScale: radius * 4.15,
+            phase: Math.random() * 0.35,
+            speed: 0.045 + Math.random() * 0.012,
+            maxOpacity: 0.055
+          };
+          nodeGroup.add(ripple);
+        }
+      }
 
       const shouldShowLabel = hasPath
         ? pathNodeIds.has(node.id)
@@ -1139,9 +1587,34 @@ export function NebulaGraph({
         label.position.copy(mesh.position).add(new THREE.Vector3(0, radius * 2.35, 10));
         label.renderOrder = 10;
         label.userData = { baseScale: 82, labelAspect: 3, phase: Math.random() * Math.PI * 2 };
-        nodeGroup.add(label);
+      nodeGroup.add(label);
       }
     });
+
+    const addCommunityPointBatch = (positions: number[], colors: number[], size: number, opacity: number, renderOrder: number) => {
+      if (positions.length === 0) return;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+      const points = new THREE.Points(
+        geometry,
+        new THREE.PointsMaterial({
+          map: dustTexture,
+          vertexColors: true,
+          size,
+          transparent: true,
+          opacity,
+          alphaTest: 0.02,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        })
+      );
+      points.renderOrder = renderOrder;
+      nodeGroup.add(points);
+    };
+
+    addCommunityPointBatch(communityDustPositions, communityDustColors, hasHover ? 2.7 : 2.1, hasHover ? 0.48 : 0.34, 6);
+    addCommunityPointBatch(communityStarPositions, communityStarColors, hasHover ? 3.7 : 2.8, hasSelection || hasPath ? 0.24 : hasHover ? 0.44 : 0.38, 7);
 
     const raycaster = new THREE.Raycaster();
     raycaster.params.Points = { threshold: largeGraph ? 10 : 4 };
@@ -1163,6 +1636,14 @@ export function NebulaGraph({
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     };
 
+    const pickNodeAtPointer = () => {
+      raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObjects(raycastTargets, false)[0];
+      return hit?.object instanceof THREE.Points
+        ? ((hit.object.userData.nodes as NodePosition[] | undefined)?.[hit.index ?? -1])
+        : ((hit?.object as NodeMesh | undefined)?.userData.node);
+    };
+
     const onPointerMove = (event: PointerEvent) => {
       if (isDragging) {
         const dx = event.clientX - lastX;
@@ -1175,12 +1656,7 @@ export function NebulaGraph({
         return;
       }
       setPointer(event);
-      raycaster.setFromCamera(pointer, camera);
-      const hit = raycaster.intersectObjects(raycastTargets, false)[0];
-      const hitNode =
-        hit?.object instanceof THREE.Points
-          ? ((hit.object.userData.nodes as NodePosition[] | undefined)?.[hit.index ?? -1])
-          : ((hit?.object as NodeMesh | undefined)?.userData.node);
+      const hitNode = pickNodeAtPointer();
       if (hitNode?.id !== hovered?.id) {
         hovered = hitNode;
         renderer.domElement.style.cursor = hitNode ? 'pointer' : 'grab';
@@ -1201,7 +1677,9 @@ export function NebulaGraph({
     const onPointerUp = (event: PointerEvent) => {
       isDragging = false;
       renderer.domElement.releasePointerCapture(event.pointerId);
-      if (hovered && dragDistance < 8) onSelectNode(hovered);
+      setPointer(event);
+      const pickedNode = pickNodeAtPointer() ?? hovered;
+      if (pickedNode && dragDistance < 8) onSelectNode(pickedNode);
     };
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
@@ -1233,24 +1711,28 @@ export function NebulaGraph({
         : representativeOverviewNodes(layout, visibleEdges);
       const fit = hasPath
         ? chooseBestFitView(fitNodes, root.rotation, camera.aspect, cameraFov, root.scale.x, {
-            padding: Math.max(1.08, focusPadding(fitNodes.length)),
-            minFrame: 430,
-            minCameraZ: 520
+            padding: focusPadding(fitNodes.length),
+            minFrame: communityView ? 420 : 400,
+            minCameraZ: communityView ? 520 : 520,
+            maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
+            preferDepth: 0.18,
+            rotationDamping: 9
           })
-        : {
-            ...createFitView(
+        : chooseAutoFrameView(
               fitNodes,
-              DEFAULT_ROOT_ROTATION,
+              communityView ? COMMUNITY_ROOT_ROTATION : DEFAULT_ROOT_ROTATION,
               camera.aspect,
               cameraFov,
               root.scale.x,
-              1.34,
-              460,
-              620,
-              1680
-            ),
-            rotation: DEFAULT_ROOT_ROTATION.clone()
-          };
+              {
+                padding: overviewPadding(layout.length),
+                minFrame: communityView ? 400 : 360,
+                minCameraZ: communityView ? 520 : 500,
+                maxCameraZ: communityView ? 1380 : 1680,
+                preferDepth: communityView ? 0.16 : 0.11,
+                rotationDamping: 6
+              }
+            );
       focusTargetRef.current = {
         id: `manual-fit-${handledCommandNonce ?? 0}`,
         center: fit.center,
@@ -1286,8 +1768,28 @@ export function NebulaGraph({
         sprite.position.copy(curve.getPoint(sprite.userData.progress));
       });
       nodeGroup.children.forEach((child) => {
+        if (child.userData.ripple) {
+          child.userData.phase = (child.userData.phase + child.userData.speed * 0.016) % 1;
+          const progress = child.userData.phase;
+          const eased = 1 - Math.pow(1 - progress, 2.4);
+          const scale = THREE.MathUtils.lerp(child.userData.baseScale, child.userData.maxScale, eased);
+          child.scale.set(scale, scale, 1);
+          const material = (child as THREE.Sprite).material as THREE.SpriteMaterial;
+          material.opacity = child.userData.maxOpacity * Math.sin(progress * Math.PI) * (1 - progress * 0.28);
+          return;
+        }
+        if ('baseScaleX' in child.userData && 'baseScaleY' in child.userData) {
+          const pulse = 1 + Math.sin(elapsed * 0.55 + child.userData.phase) * 0.026;
+          child.scale.set(child.userData.baseScaleX * pulse, child.userData.baseScaleY * pulse, 1);
+          if ('spin' in child.userData) {
+            child.rotation.z += child.userData.spin;
+          }
+          return;
+        }
         if (!('baseScale' in child.userData)) return;
-        const scale = child.userData.baseScale * (1 + Math.sin(elapsed * 1.8 + child.userData.phase) * 0.055);
+        const pulseSpeed = child.userData.pulseSpeed ?? 1.8;
+        const pulseAmp = child.userData.pulseAmp ?? 0.055;
+        const scale = child.userData.baseScale * (1 + Math.sin(elapsed * pulseSpeed + child.userData.phase) * pulseAmp);
         if ('labelAspect' in child.userData) {
           child.scale.set(scale, scale / child.userData.labelAspect, 1);
         } else {
@@ -1299,13 +1801,14 @@ export function NebulaGraph({
       });
       if (focusTargetRef.current?.active) {
         const target = focusTargetRef.current;
-        root.position.x += (-target.center.x - root.position.x) * 0.026;
-        root.position.y += (-target.center.y - root.position.y) * 0.026;
-        root.position.z += (-target.center.z * 0.18 - root.position.z) * 0.018;
-        root.rotation.x += (target.rotation.x - root.rotation.x) * 0.032;
-        root.rotation.y += (target.rotation.y - root.rotation.y) * 0.032;
-        root.rotation.z += (target.rotation.z - root.rotation.z) * 0.032;
-        camera.position.z += (target.cameraZ - camera.position.z) * 0.022;
+        const focusDepthOffset = communityView ? 0.26 : 0.18;
+        root.position.x += (-target.center.x - root.position.x) * 0.045;
+        root.position.y += (-target.center.y - root.position.y) * 0.045;
+        root.position.z += (-target.center.z * focusDepthOffset - root.position.z) * 0.034;
+        root.rotation.x += (target.rotation.x - root.rotation.x) * 0.052;
+        root.rotation.y += (target.rotation.y - root.rotation.y) * 0.052;
+        root.rotation.z += (target.rotation.z - root.rotation.z) * 0.052;
+        camera.position.z += (target.cameraZ - camera.position.z) * 0.04;
         cameraTargetZ = target.cameraZ;
         if (
           Math.abs(root.position.x + target.center.x) < 0.8 &&
@@ -1330,7 +1833,8 @@ export function NebulaGraph({
         rootPosition: root.position.clone(),
         rootRotation: root.rotation.clone(),
         rootScale: root.scale.x,
-        cameraZ: camera.position.z
+        cameraZ: camera.position.z,
+        dataSignature
       };
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
@@ -1344,6 +1848,8 @@ export function NebulaGraph({
     };
   }, [
     data,
+    dataSignature,
+    communityView,
     focusedNodeId,
     highlightedPath,
     layout,

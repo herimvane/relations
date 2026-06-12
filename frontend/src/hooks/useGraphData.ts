@@ -3,12 +3,12 @@ import { fetchGraph, uploadCsv, uploadExcel } from '../api/graphApi';
 import { mockGraph } from '../data/mockGraph';
 import { GraphData } from '../types/graph';
 
-export function useGraphData() {
+export function useGraphData(autoRefresh = true) {
   const [data, setData] = useState<GraphData>({ nodes: [], edges: [] });
   const [source, setSource] = useState('loading');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(autoRefresh);
   const [error, setError] = useState<string>();
-  const [status, setStatus] = useState('正在连接后端图谱数据...');
+  const [status, setStatus] = useState(autoRefresh ? '正在连接后端图谱数据...' : '正在加载 10 万级 Universe 视图...');
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -79,8 +79,8 @@ export function useGraphData() {
   }, []);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    if (autoRefresh) refresh();
+  }, [autoRefresh, refresh]);
 
-  return { data, setData, source, setSource, loading, error, setError, status, setStatus, refresh, importExcel, importCsv, loadMock };
+  return { data, setData, source, setSource, loading, setLoading, error, setError, status, setStatus, refresh, importExcel, importCsv, loadMock };
 }

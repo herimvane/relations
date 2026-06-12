@@ -1,0 +1,22 @@
+{
+  "active_dataset": "social",
+  "postgres": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "username": "herimvane",
+    "password": "",
+    "schema": "public",
+    "node_table": "nodes",
+    "edge_table": "edges"
+  },
+  "datasets": {
+    "social": {
+      "database": "relations",
+      "title": "社交关系大图"
+    },
+    "enterprise": {
+      "database": "relations2",
+      "title": "企业/风控关系图"
+    }
+  }
+}

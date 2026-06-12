@@ -1,4 +1,4 @@
-import { GraphData } from '../types/graph';
+import { GraphData, GraphViewResponse } from '../types/graph';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
 
@@ -32,5 +32,29 @@ export async function uploadCsv(nodesFile?: File, edgesFile?: File): Promise<Gra
   if (edgesFile) form.append('edges_file', edgesFile);
   const response = await fetch(`${API_BASE}/api/import/csv`, { method: 'POST', body: form });
   if (!response.ok) throw await apiError(response, 'CSV import failed');
+  return response.json();
+}
+
+export async function fetchUniverseView(): Promise<GraphViewResponse> {
+  const response = await fetch(`${API_BASE}/api/views/universe`);
+  if (!response.ok) throw await apiError(response, 'Universe view API failed');
+  return response.json();
+}
+
+export async function fetchGalaxyView(communityId: string): Promise<GraphViewResponse> {
+  const response = await fetch(`${API_BASE}/api/views/galaxy/${encodeURIComponent(communityId)}`);
+  if (!response.ok) throw await apiError(response, 'Galaxy view API failed');
+  return response.json();
+}
+
+export async function fetchBackboneView(nodeId: string): Promise<GraphViewResponse> {
+  const response = await fetch(`${API_BASE}/api/views/backbone/${encodeURIComponent(nodeId)}`);
+  if (!response.ok) throw await apiError(response, 'Backbone view API failed');
+  return response.json();
+}
+
+export async function fetchLocalView(nodeId: string): Promise<GraphViewResponse> {
+  const response = await fetch(`${API_BASE}/api/views/local/${encodeURIComponent(nodeId)}`);
+  if (!response.ok) throw await apiError(response, 'Local view API failed');
   return response.json();
 }

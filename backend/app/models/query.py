@@ -1,5 +1,3 @@
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 from app.models.graph import GraphData
@@ -19,10 +17,3 @@ class PathQueryRequest(BaseModel):
     max_paths: int = 12
     graph: GraphData | None = None
 
-
-class ExtractTableRequest(BaseModel):
-    rows: list[dict[str, Any]]
-    source_field: str
-    target_field: str
-    relation_field: str | None = None
-    weight_field: str | None = None

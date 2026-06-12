@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { GraphData, GraphNode, GraphPath } from '../types/graph';
 import { PathQueryPanel } from './PathQueryPanel';
 
@@ -10,6 +11,8 @@ type Props = {
   activePathId?: string;
   pathQueryLabel?: string;
   onPickPath: (pathId: string) => void;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 };
 
 function formatPropertyValue(value: unknown): string {
@@ -32,7 +35,7 @@ function displayProperties(properties?: Record<string, unknown>) {
   return entries;
 }
 
-export function RightPanel({ selected, hovered, data, pathResults, activePathId, pathQueryLabel, onPickPath }: Props) {
+export function RightPanel({ selected, hovered, data, pathResults, activePathId, pathQueryLabel, onPickPath, collapsed, onToggleCollapsed }: Props) {
   const node = hovered ?? selected;
   const degreeIndex = useMemo(() => {
     const index = new Map<string, number>();
@@ -46,7 +49,12 @@ export function RightPanel({ selected, hovered, data, pathResults, activePathId,
   const properties = displayProperties(node?.properties);
 
   return (
-    <aside className="right-panel">
+    <aside className={`right-panel ${collapsed ? 'collapsed' : ''}`}>
+      <button type="button" className="detail-toggle" onClick={onToggleCollapsed} title={collapsed ? '展开节点详情' : '折叠节点详情'}>
+        {collapsed ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
+      </button>
+      {!collapsed && (
+        <>
       <section className="panel-section node-detail">
         <div className="section-title">节点详情</div>
         {!node ? (
@@ -88,6 +96,8 @@ export function RightPanel({ selected, hovered, data, pathResults, activePathId,
         queryLabel={pathQueryLabel}
         onPickPath={onPickPath}
       />
+        </>
+      )}
     </aside>
   );
 }

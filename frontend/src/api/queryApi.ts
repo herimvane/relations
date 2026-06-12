@@ -21,19 +21,3 @@ export async function queryPath(source: string, target: string, maxDepth = 4, ma
   if (!response.ok) throw await apiError(response, 'Path query failed');
   return response.json();
 }
-
-export async function extractTableGraph(payload: {
-  rows: Record<string, unknown>[];
-  source_field: string;
-  target_field: string;
-  relation_field?: string;
-  weight_field?: string;
-}): Promise<GraphData> {
-  const response = await fetch(`${API_BASE}/api/graph/extract-table`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) throw await apiError(response, 'Table extraction failed');
-  return response.json();
-}

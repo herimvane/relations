@@ -2,11 +2,13 @@
 
 一个前后端分离的“星云关系图/宇宙关系网”MVP。
 
+当前版本：`1.0.0`
+
 ## 技术栈
 
 - 前端：React + TypeScript + Vite + Three.js + d3-force
-- 后端：Python FastAPI + pandas + openpyxl
-- 数据源：Excel/CSV，预留 PostgreSQL 图谱读取能力
+- 后端：Python FastAPI + pandas + openpyxl + SQLAlchemy
+- 数据源：Excel/CSV/PostgreSQL
 
 ## 项目结构
 
@@ -55,15 +57,80 @@ POST /api/datasources/postgres/graph
 POST /api/graph/filter
 POST /api/graph/path
 POST /api/graph/extract-table
+GET  /api/views/universe
+GET  /api/views/galaxy/{community_id}
+GET  /api/views/backbone/{node_id}
+GET  /api/views/local/{node_id}
 ```
 
 ## 第三阶段能力
 
 - PostgreSQL：左侧数据源面板支持连接测试、节点表/边表和字段映射读取。
 - 字段映射：通过 JSON 映射配置，例如 `{"id":"id","name":"name","type":"type","group":"group","weight":"weight"}`。
-- 二维表抽取：左侧“二维表抽取”支持粘贴 CSV/TSV 文本，指定 source/target/relation/weight 字段后生成标准图谱。
+- 二维表抽取：后端保留 `/api/graph/extract-table` 能力，主图谱页不再放置该入口；后续建议放入独立的数据准备/字段映射页面。
 - 筛选：支持节点类型、关系类型、权重阈值筛选。
 - 路径查询：前端搜索框支持 `节点A::节点B`，后端 `/api/graph/path` 支持按节点 ID 或名称查询多条路径的并集图谱。
+
+## 1.0.0 四级视图
+
+10 万级以上图谱不直接全量渲染，而是按视图层级逐步展开：
+
+```text
+L0 Universe：社区/集团/簇总览，只显示聚合节点和 Top 跨社区关系。
+L1 Galaxy：点击社区后进入该社区的高重要度节点与内部关系。
+L2 Backbone：点击具体节点后进入核心骨干关系，优先保留重要邻居和强关系。
+L3 Local：继续点击节点后进入局部邻域，展示该节点的一跳上下文。
+```
+
+前端顶部数据集选择：
+
+```text
+social     -> PostgreSQL database: relations
+enterprise -> PostgreSQL database: relations2
+```
+
+当前数据库约定：
+
+```text
+relations  = 社交关系大图，100,000 节点 / 800,000 关系
+relations2 = 企业/风控关系图，100,000 节点 / 800,000 关系
+```
+
+L0 默认保留 `220` 个社区和 Top `180` 条跨社区聚合关系，可通过 `/api/views/universe?limit=220&edge_limit=180` 调整。
+
+数据表：
+
+```text
+nodes(id, name, type, group, weight, properties, community_id, importance_score, computed_at)
+edges(id, source, target, relation_type, weight, properties, importance_score, computed_at)
+```
+
+生成或重建测试数据：
+
+```bash
+cd backend
+.venv/bin/python scripts/seed_large_graph_postgres.py \
+  --dataset social \
+  --nodes 100000 \
+  --edges 800000 \
+  --communities 220 \
+  --database relations \
+  --username herimvane \
+  --password '' \
+  --create-database \
+  --replace
+
+.venv/bin/python scripts/seed_large_graph_postgres.py \
+  --dataset enterprise \
+  --nodes 100000 \
+  --edges 800000 \
+  --communities 220 \
+  --database relations2 \
+  --username herimvane \
+  --password '' \
+  --create-database \
+  --replace
+```
 
 ## 核心节点计算
 
@@ -171,8 +238,9 @@ docs/csv_template.md
 
 ## 使用说明
 
-- 后端未启动时，前端会自动使用 mock 数据。
+- 默认首页进入 `social` 数据集的 L0 Universe 视图，需要后端和 PostgreSQL 可用。
+- 后端未启动时，可在左侧数据源面板手动切回 mock 数据。
 - 上传 Excel 后，前端会调用 `/api/import/excel` 并刷新图谱。
 - 上传 CSV 后，前端会调用 `/api/import/csv` 并刷新图谱。
-- 点击节点会高亮一跳关系。
+- 在普通图谱数据中，点击节点会高亮一跳关系；在 L0-L3 视图数据中，点击节点会进入下一层视图。
 - 边上发光粒子从 source 流向 target，只对高权重边和高亮边播放，以控制性能。
