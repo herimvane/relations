@@ -1,37 +1,12 @@
-# 关联关系可视化工具 MVP
+# NebulaNet
 
-一个前后端分离的“星云关系图/宇宙关系网”MVP。
+星域洞察 · NebulaNet 是一个面向社交关系、企业关系和风控关系的图谱可视化系统。前端使用 React + TypeScript + Three.js，后端使用 FastAPI + PostgreSQL，支持 Excel/CSV 导入、社区识别、重要度计算、四级视图和路径搜索。
 
 当前版本：`1.1.0`
 
-## 技术栈
+## 快速启动
 
-- 前端：React + TypeScript + Vite + Three.js + d3-force
-- 后端：Python FastAPI + pandas + openpyxl + psycopg / SQLAlchemy
-- 数据源：Excel/CSV/PostgreSQL
-
-## 项目结构
-
-```text
-frontend/  前端星云关系图
-backend/   FastAPI 数据接口
-docs/      Excel 模板与说明
-tmp/       独立数据导入脚本
-```
-
-## 详细文档
-
-完整项目说明、数据模型、导入方式、四级视图、社区识别、重要度、布局、自动取景、路径搜索和性能策略见：
-
-```text
-docs/project_manual.md
-```
-
-## 部署说明
-
-### Docker Compose 部署
-
-项目已提供 Docker Compose，一次启动前端、后端和 PostgreSQL：
+推荐使用 Docker Compose：
 
 ```bash
 docker compose up --build
@@ -45,61 +20,29 @@ docker compose up --build
 PostgreSQL：localhost:5432
 ```
 
-默认容器数据库配置：
+默认数据库账号：
 
 ```text
-POSTGRES_USER=nebulanet
-POSTGRES_PASSWORD=nebulanet
-POSTGRES_DB=relations
+username: nebulanet
+password: nebulanet
+database: relations
 ```
 
-Docker 后端使用：
-
-```text
-backend/datasources.docker.json
-```
-
-默认 active dataset 为 `social`，对应数据库 `relations`；初始化脚本会额外创建 `relations2`，供企业/风控数据集扩展使用。数据库数据保存在 Docker Compose volume `postgres-data` 中。
-
-常用命令：
+停止服务：
 
 ```bash
-docker compose ps
-docker compose logs -f backend
 docker compose down
-docker compose down -v   # 同时删除数据库 volume，谨慎使用
 ```
 
-需要导入正式数据时，启动容器后在页面使用“导入数据 -> 数据库模式”，或在宿主机/容器内运行独立导入脚本，连接信息使用 `localhost:5432` 或 Compose 网络内的 `postgres:5432`。
-
-### 传统部署
-
-生产部署建议使用：
-
-```text
-Nginx 托管 frontend/dist
-FastAPI 运行在 127.0.0.1:8000
-Nginx 将 /api 反向代理到 FastAPI
-PostgreSQL 存储正式图谱数据
-```
-
-完整部署步骤、systemd 示例、Nginx 配置、数据库初始化和验证方式见：
-
-```text
-docs/project_manual.md#3-部署方式
-```
-
-## 前端运行
+删除数据库 volume：
 
 ```bash
-cd frontend
-npm install
-npm run dev
+docker compose down -v
 ```
 
-访问：`http://localhost:5173`
+## 本地开发
 
-## 后端运行
+后端：
 
 ```bash
 cd backend
@@ -109,209 +52,101 @@ pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
-也可以直接使用固定虚拟环境的启动脚本：
+前端：
 
 ```bash
-cd backend
-./scripts/run_dev.sh
+cd frontend
+npm install
+npm run dev
 ```
 
-## API
+访问：
 
 ```text
-GET  /api/health
-GET  /api/graph
-POST /api/import/excel
-POST /api/import/csv
-POST /api/datasources/postgres/test
-POST /api/datasources/postgres/graph
-POST /api/graph/filter
-POST /api/graph/path
-POST /api/graph/extract-table
-GET  /api/views/universe
-GET  /api/views/galaxy/{community_id}
-GET  /api/views/backbone/{node_id}
-GET  /api/views/local/{node_id}
+http://localhost:5173
 ```
 
-## 第三阶段能力
+## 核心能力
 
-- PostgreSQL：左侧数据源面板支持连接测试、节点表/边表和字段映射读取。
-- 字段映射：通过 JSON 映射配置，例如 `{"id":"id","name":"name","type":"type","group":"group","weight":"weight"}`。
-- 二维表抽取：后端保留 `/api/graph/extract-table` 能力，主图谱页不再放置该入口；后续建议放入独立的数据准备/字段映射页面。
-- 筛选：支持节点类型、关系类型、权重阈值筛选。
-- 路径查询：前端搜索框支持 `节点A::节点B`，后端 `/api/graph/path` 支持按节点 ID 或名称查询多条路径的并集图谱。
+- 暗色星云关系图，基于 Three.js/WebGL 渲染。
+- L0/L1/L2/L3 四级视图，适配大规模图谱。
+- Excel/CSV 临时导入。
+- Excel/CSV 数据库模式导入，支持预检报告和确认入库。
+- 社区识别：Leiden、Louvain、Label Propagation、连通分量、已有字段。
+- 节点重要度：默认结构公式 + 可添加数值属性字段。
+- 搜索：节点搜索、路径搜索、数据库候选路径。
+- Docker Compose 部署：frontend + backend + PostgreSQL。
 
-## 1.0.0 四级视图
-
-10 万级以上图谱不直接全量渲染，而是按视图层级逐步展开：
+## 项目结构
 
 ```text
-L0 Universe：社区/集团/簇总览，只显示聚合节点和 Top 跨社区关系。
-L1 Galaxy：点击社区后进入该社区的高重要度节点与内部关系。
-L2 Backbone：点击具体节点后进入核心骨干关系，优先保留重要邻居和强关系。
-L3 Local：继续点击节点后进入局部邻域，展示该节点的一跳上下文。
+frontend/   React + TypeScript + Vite + Three.js
+backend/    FastAPI + PostgreSQL + pandas/openpyxl
+docs/       模板和完整项目说明
+docker/     PostgreSQL 初始化脚本
+tmp/        本地临时脚本，不作为核心代码发布
 ```
 
-前端顶部数据集选择：
+## 数据导入
+
+页面“导入数据”支持两种模式：
 
 ```text
-social     -> PostgreSQL database: relations
-enterprise -> PostgreSQL database: relations2
+临时模式：上传 Excel/CSV，只写入后端内存，适合快速查看。
+数据库模式：上传 Excel/CSV，预检后写入 PostgreSQL，适合正式数据。
 ```
 
-当前数据库约定：
+Excel 推荐包含两个 sheet：
 
 ```text
-relations  = 社交关系大图，100,000 节点 / 800,000 关系
-relations2 = 企业/风控关系图，100,000 节点 / 800,000 关系
+nodes
+edges
 ```
 
-L0 默认保留 `220` 个社区和 Top `180` 条跨社区聚合关系，可通过 `/api/views/universe?limit=220&edge_limit=180` 调整。
-
-数据表：
+CSV 推荐一次选择两个文件：
 
 ```text
-nodes(id, name, type, group, weight, properties, community_id, importance_score, computed_at)
-edges(id, source, target, relation_type, weight, properties, importance_score, computed_at)
+nodes.csv
+edges.csv
 ```
 
-生成或重建测试数据：
+只上传一个 CSV 时，系统会倾向按关系表处理，并根据 `source` / `target` 自动补全节点。
 
-```bash
-cd backend
-.venv/bin/python scripts/seed_large_graph_postgres.py \
-  --dataset social \
-  --nodes 100000 \
-  --edges 800000 \
-  --communities 220 \
-  --database relations \
-  --username herimvane \
-  --password '' \
-  --create-database \
-  --replace
-
-.venv/bin/python scripts/seed_large_graph_postgres.py \
-  --dataset enterprise \
-  --nodes 100000 \
-  --edges 800000 \
-  --communities 220 \
-  --database relations2 \
-  --username herimvane \
-  --password '' \
-  --create-database \
-  --replace
-```
-
-## 核心节点计算
-
-前端不再依赖固定数据顺序判断核心节点，而是对所有数据源统一计算 `core_score`。适用数据源包括 Excel、CSV、PostgreSQL 和二维表抽取。
-
-当前核心评分公式：
+## 常用接口
 
 ```text
-core_score =
-  度中心性 * 0.40
-  + 节点权重 * 0.35
-  + 加权关系强度 * 0.20
-  + 类型优先级 * 0.05
+GET    /api/health
+GET    /api/views/universe
+GET    /api/views/galaxy/{community_id}
+GET    /api/views/backbone/{node_id}
+GET    /api/views/local/{node_id}
+GET    /api/search/nodes
+GET    /api/search/path
+POST   /api/import/excel
+POST   /api/import/csv
+POST   /api/import/database/preview-jobs
+GET    /api/import/database/preview-jobs/{job_id}
+DELETE /api/import/database/preview-jobs/{job_id}
+POST   /api/import/database/commit
 ```
 
-计算说明：
+## 文档
 
-- `度中心性`：节点直接连接的边数量，按当前图谱最大度数归一化。
-- `节点权重`：节点字段 `weight`，按当前图谱最大节点权重归一化。
-- `加权关系强度`：节点所有相邻边的 `weight` 之和，按当前图谱最大关系强度归一化。
-- `类型优先级`：根据节点类型给出轻量业务修正，例如核心主体、集团、企业、实际控制人、家族长辈等会获得更高基础优先级。
-
-核心评分用途：
-
-- 初始化布局时，`core_score` 最高的节点放在图谱中央。
-- 前若干高分节点围绕中心形成核心层。
-- 大规模数据概览优先展示高分核心节点及其高权重一跳关系。
-- 初始化相机取景优先围绕核心节点群，而不是随机节点或固定节点。
-
-节点层级按 `color.md` 固定数量规则划分：
+完整说明见：
 
 ```text
-核心节点 = min(max(1, 总节点数 * 1%), 30)
-一级重要 = min(总节点数 * 8%, 160)
-二级节点 = min(总节点数 * 30%, 800)
-三级节点 = 其余
-特殊节点 = 风险规则覆盖
+docs/project_manual.md
 ```
 
-实现位置：
-
-```text
-frontend/src/graph/coreScore.ts
-frontend/src/graph/createForceLayout.ts
-frontend/src/hooks/useGraphViewport.ts
-frontend/src/workers/graphViewport.worker.ts
-```
-
-## 大规模数据展示策略
-
-大规模图谱不会一次性完整渲染所有节点、所有边和所有动画。系统采用 WebGL + LOD + 聚合 + 局部展开策略，保证画布可读和交互性能。
-
-当前策略：
-
-- 当节点数超过阈值，或存在聚合簇节点，或节点数较多时，进入大图布局模式。
-- 初始化只展示综合评分最高的一批核心节点，以及它们的高权重一跳关系。
-- 超出展示阈值的外围节点会按 `group + type` 聚合为簇节点。
-- 缩小时优先显示核心节点和聚合点，避免满屏密集小点。
-- 点击节点后，以该节点为焦点展开一跳、二跳、三跳上下文。
-- 聚焦节点的邻居和高权重关系优先保留，低优先级关系降级为背景。
-- 路径搜索结果会额外绘制独立路径覆盖层，不依赖普通边是否已被 LOD 裁剪。
-- 粒子动画只应用在高权重边、聚焦边和路径边上，避免全量动画导致卡顿。
-- 大图中的普通边会合并为 `LineSegments` 批量渲染，减少 Three.js 对象数量。
-- 聚合和视口裁剪逻辑优先在 Worker 中执行，降低主线程压力。
-
-大规模图谱相关实现：
-
-```text
-frontend/src/hooks/useGraphViewport.ts
-frontend/src/workers/graphViewport.worker.ts
-frontend/src/graph/NebulaGraph.tsx
-frontend/src/graph/createForceLayout.ts
-```
-
-## Excel 模板
-
-示例模板位于：
-
-```text
-docs/graph_excel_template.xlsx
-```
-
-说明见：
+模板说明：
 
 ```text
 docs/excel_template.md
-```
-
-## CSV 模板
-
-示例模板位于：
-
-```text
-docs/nodes_template.csv
-docs/edges_template.csv
-```
-
-说明见：
-
-```text
 docs/csv_template.md
 ```
 
-前端顶部支持导入 Excel，也支持一次选择一个或两个 CSV 文件。CSV 文件名包含 `nodes` / `edges` 时会自动识别；如果只上传关系 CSV，后端会根据 `source` / `target` 自动生成节点。
+## 备注
 
-## 使用说明
-
-- 默认首页进入 `social` 数据集的 L0 Universe 视图，需要后端和 PostgreSQL 可用。
-- 上传 Excel 后，前端会调用 `/api/import/excel` 并刷新图谱。
-- 上传 CSV 后，前端会调用 `/api/import/csv` 并刷新图谱。
-- 在普通图谱数据中，点击节点会高亮一跳关系；在 L0-L3 视图数据中，点击节点会进入下一层视图。
-- 右侧普通状态显示“一跳关联 Top N / 共 M”；只有输入 `节点A::节点B` 后才进入“路径分析”。
-- 边上发光粒子从 source 流向 target，只对高权重边和高亮边播放，以控制性能。
+- 根目录只保留 `README.md` 作为入口文档。
+- 详细算法、部署、导入流程、路径搜索和性能策略统一维护在 `docs/project_manual.md`。
+- `outputs/` 和 `tmp/` 用于本地测试数据与临时脚本，不建议提交到仓库。
