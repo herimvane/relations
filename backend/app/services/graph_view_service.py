@@ -245,6 +245,78 @@ def local(dataset: str, node_id: str, limit: int = 1000) -> GraphViewResponse:
     node_table = _safe_table(config.node_table)
     edge_table = _safe_table(config.edge_table)
     with _engine(dataset).connect() as conn:
+        candidate_rows = conn.execute(
+            text(
+                f"""
+                with one_hop as (
+                    select source as id from {edge_table} where target = :node_id
+                    union
+                    select target as id from {edge_table} where source = :node_id
+                    limit :limit_plus_one
+                ),
+                two_hop as (
+                    select case when e.source = one_hop.id then e.target else e.source end as id
+                    from {edge_table} e
+                    join one_hop on e.source = one_hop.id or e.target = one_hop.id
+                    where case when e.source = one_hop.id then e.target else e.source end <> :node_id
+                    limit :limit_plus_one
+                ),
+                candidate as (
+                    select cast(:node_id as text) as id
+                    union
+                    select id from one_hop
+                    union
+                    select id from two_hop
+                )
+                select id from candidate
+                limit :limit_plus_one
+                """
+            ),
+            {"node_id": node_id, "limit_plus_one": limit + 1},
+        ).all()
+        candidate_ids = [str(row._mapping["id"]) for row in candidate_rows]
+        complete = 0 < len(candidate_ids) <= limit
+
+        if complete:
+            node_rows = conn.execute(
+                text(
+                    f"""
+                    select * from {node_table}
+                    where id = any(:node_ids)
+                    order by case when id = :node_id then 1 else 0 end desc,
+                             coalesce(importance_score, 0) desc,
+                             weight desc
+                    """
+                ),
+                {"node_ids": candidate_ids, "node_id": node_id},
+            ).all()
+            nodes = [_node(row) for row in node_rows]
+            node_ids = [node.id for node in nodes]
+            edge_rows = conn.execute(
+                text(
+                    f"""
+                    select * from {edge_table}
+                    where source = any(:node_ids) and target = any(:node_ids)
+                    order by case when source = :node_id or target = :node_id then 1 else 0 end desc,
+                             coalesce(importance_score, weight / 100.0) desc,
+                             weight desc
+                    limit 10000
+                    """
+                ),
+                {"node_ids": node_ids, "node_id": node_id},
+            ).all() if node_ids else []
+            edges = [_edge(row) for row in edge_rows]
+            stats = _stats(conn, node_table, edge_table, len(nodes), len(edges))
+            return GraphViewResponse(
+                view_level="L3",
+                title=f"{data.title} / Local {node_id}",
+                nodes=nodes,
+                edges=edges,
+                can_drill=False,
+                complete=True,
+                stats=stats,
+            )
+
         node_rows = conn.execute(
             text(
                 f"""
@@ -281,4 +353,12 @@ def local(dataset: str, node_id: str, limit: int = 1000) -> GraphViewResponse:
         ).all() if node_ids else []
         edges = [_edge(row) for row in edge_rows]
         stats = _stats(conn, node_table, edge_table, len(nodes), len(edges))
-    return GraphViewResponse(view_level="L3", title=f"{data.title} / Local {node_id}", nodes=nodes, edges=edges, stats=stats)
+    return GraphViewResponse(
+        view_level="L3",
+        title=f"{data.title} / Local {node_id}",
+        nodes=nodes,
+        edges=edges,
+        can_drill=True,
+        complete=False,
+        stats=stats,
+    )

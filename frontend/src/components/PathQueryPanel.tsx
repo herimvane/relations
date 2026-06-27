@@ -22,11 +22,15 @@ export function PathQueryPanel({ selected, nodes, edges, paths, activePathId, qu
         : [],
     [edges, selected]
   );
+  const visibleRelated = related.slice(0, 8);
   const displayNode = (id: string) => nodeNameIndex.get(id) ?? id;
+  const sectionTitle = paths.length > 0 || queryLabel
+    ? `路径分析${paths.length > 0 ? ` ${paths.length} 条` : ''}`
+    : `一跳关联${selected ? ` Top ${visibleRelated.length} / 共 ${related.length}` : ''}`;
 
   return (
     <section className="panel-section">
-      <div className="section-title">{paths.length > 0 || queryLabel ? '路径分析' : '关联路径'}</div>
+      <div className="section-title">{sectionTitle}</div>
       {paths.length > 0 ? (
         <div className="path-list">
           {paths.map((path, index) => (
@@ -48,8 +52,8 @@ export function PathQueryPanel({ selected, nodes, edges, paths, activePathId, qu
         <p className="empty">选择节点后查看一跳关联</p>
       ) : (
         <div className="path-list">
-          {related.slice(0, 8).map((edge) => (
-            <div className="path-row" key={edge.id ?? `${edge.source}-${edge.target}`}>
+          {visibleRelated.map((edge, index) => (
+            <div className="path-row" key={edge.id ?? `${edge.source}-${edge.target}-${edge.relation_type}-${index}`}>
               <span title={edge.source}>{displayNode(edge.source)}</span>
               <b>{edge.relation_type}</b>
               <span title={edge.target}>{displayNode(edge.target)}</span>

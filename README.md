@@ -2,12 +2,12 @@
 
 一个前后端分离的“星云关系图/宇宙关系网”MVP。
 
-当前版本：`1.0.0`
+当前版本：`1.1.0`
 
 ## 技术栈
 
 - 前端：React + TypeScript + Vite + Three.js + d3-force
-- 后端：Python FastAPI + pandas + openpyxl + SQLAlchemy
+- 后端：Python FastAPI + pandas + openpyxl + psycopg / SQLAlchemy
 - 数据源：Excel/CSV/PostgreSQL
 
 ## 项目结构
@@ -16,6 +16,77 @@
 frontend/  前端星云关系图
 backend/   FastAPI 数据接口
 docs/      Excel 模板与说明
+tmp/       独立数据导入脚本
+```
+
+## 详细文档
+
+完整项目说明、数据模型、导入方式、四级视图、社区识别、重要度、布局、自动取景、路径搜索和性能策略见：
+
+```text
+docs/project_manual.md
+```
+
+## 部署说明
+
+### Docker Compose 部署
+
+项目已提供 Docker Compose，一次启动前端、后端和 PostgreSQL：
+
+```bash
+docker compose up --build
+```
+
+访问：
+
+```text
+前端：http://localhost:5173
+后端：http://localhost:8000/api/health
+PostgreSQL：localhost:5432
+```
+
+默认容器数据库配置：
+
+```text
+POSTGRES_USER=nebulanet
+POSTGRES_PASSWORD=nebulanet
+POSTGRES_DB=relations
+```
+
+Docker 后端使用：
+
+```text
+backend/datasources.docker.json
+```
+
+默认 active dataset 为 `social`，对应数据库 `relations`；初始化脚本会额外创建 `relations2`，供企业/风控数据集扩展使用。数据库数据保存在 Docker Compose volume `postgres-data` 中。
+
+常用命令：
+
+```bash
+docker compose ps
+docker compose logs -f backend
+docker compose down
+docker compose down -v   # 同时删除数据库 volume，谨慎使用
+```
+
+需要导入正式数据时，启动容器后在页面使用“导入数据 -> 数据库模式”，或在宿主机/容器内运行独立导入脚本，连接信息使用 `localhost:5432` 或 Compose 网络内的 `postgres:5432`。
+
+### 传统部署
+
+生产部署建议使用：
+
+```text
+Nginx 托管 frontend/dist
+FastAPI 运行在 127.0.0.1:8000
+Nginx 将 /api 反向代理到 FastAPI
+PostgreSQL 存储正式图谱数据
+```
+
+完整部署步骤、systemd 示例、Nginx 配置、数据库初始化和验证方式见：
+
+```text
+docs/project_manual.md#3-部署方式
 ```
 
 ## 前端运行
@@ -134,7 +205,7 @@ cd backend
 
 ## 核心节点计算
 
-前端不再依赖 mock 数据顺序判断核心节点，而是对所有数据源统一计算 `core_score`。适用数据源包括 mock、Excel、CSV、PostgreSQL 和二维表抽取。
+前端不再依赖固定数据顺序判断核心节点，而是对所有数据源统一计算 `core_score`。适用数据源包括 Excel、CSV、PostgreSQL 和二维表抽取。
 
 当前核心评分公式：
 
@@ -158,7 +229,7 @@ core_score =
 - 初始化布局时，`core_score` 最高的节点放在图谱中央。
 - 前若干高分节点围绕中心形成核心层。
 - 大规模数据概览优先展示高分核心节点及其高权重一跳关系。
-- 初始化相机取景优先围绕核心节点群，而不是随机节点或 mock 中的固定节点。
+- 初始化相机取景优先围绕核心节点群，而不是随机节点或固定节点。
 
 节点层级按 `color.md` 固定数量规则划分：
 
@@ -239,8 +310,8 @@ docs/csv_template.md
 ## 使用说明
 
 - 默认首页进入 `social` 数据集的 L0 Universe 视图，需要后端和 PostgreSQL 可用。
-- 后端未启动时，可在左侧数据源面板手动切回 mock 数据。
 - 上传 Excel 后，前端会调用 `/api/import/excel` 并刷新图谱。
 - 上传 CSV 后，前端会调用 `/api/import/csv` 并刷新图谱。
 - 在普通图谱数据中，点击节点会高亮一跳关系；在 L0-L3 视图数据中，点击节点会进入下一层视图。
+- 右侧普通状态显示“一跳关联 Top N / 共 M”；只有输入 `节点A::节点B` 后才进入“路径分析”。
 - 边上发光粒子从 source 流向 target，只对高权重边和高亮边播放，以控制性能。

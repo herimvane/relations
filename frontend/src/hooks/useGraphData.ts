@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fetchGraph, uploadCsv, uploadExcel } from '../api/graphApi';
-import { mockGraph } from '../data/mockGraph';
 import { GraphData } from '../types/graph';
 
 export function useGraphData(autoRefresh = true) {
@@ -16,17 +15,18 @@ export function useGraphData(autoRefresh = true) {
     try {
       const remote = await fetchGraph();
       if (remote.nodes.length === 0) {
-        throw new Error('Backend graph is empty, using mock data');
+        throw new Error('Backend graph is empty');
       }
       setData(remote);
       setSource('api');
       setError(undefined);
       setStatus(`已加载后端图谱：${remote.nodes.length.toLocaleString()} 节点 / ${remote.edges.length.toLocaleString()} 关系`);
     } catch (err) {
-      setData(mockGraph);
-      setSource('mock');
-      setError(err instanceof Error ? err.message : 'Backend unavailable, using mock data');
-      setStatus(`使用内置 mock 数据：${mockGraph.nodes.length.toLocaleString()} 节点 / ${mockGraph.edges.length.toLocaleString()} 关系`);
+      const message = err instanceof Error ? err.message : 'Backend graph unavailable';
+      setData({ nodes: [], edges: [] });
+      setSource('unavailable');
+      setError(message);
+      setStatus(`后端图谱不可用：${message}`);
     } finally {
       setLoading(false);
     }
@@ -55,8 +55,15 @@ export function useGraphData(autoRefresh = true) {
     setStatus('正在导入 CSV 数据...');
     try {
       const lowerName = (file: File) => file.name.toLowerCase();
-      const nodesFile = files.find((file) => /node|nodes|节点/.test(lowerName(file))) ?? files[0];
-      const edgesFile = files.find((file) => /edge|edges|relation|relations|关系|边/.test(lowerName(file))) ?? files[1];
+      let nodesFile = files.find((file) => /node|nodes|节点/.test(lowerName(file)));
+      let edgesFile = files.find((file) => /edge|edges|relation|relations|关系|边/.test(lowerName(file)));
+      if (!nodesFile && !edgesFile) {
+        if (files.length === 1) edgesFile = files[0];
+        else {
+          nodesFile = files[0];
+          edgesFile = files[1];
+        }
+      }
       const imported = await uploadCsv(nodesFile, edgesFile);
       setData(imported);
       setSource(`csv:${files.map((file) => file.name).join(', ')}`);
@@ -71,16 +78,9 @@ export function useGraphData(autoRefresh = true) {
     }
   }, []);
 
-  const loadMock = useCallback(() => {
-    setData(mockGraph);
-    setSource('mock');
-    setError(undefined);
-    setStatus(`已切回内置 mock 数据：${mockGraph.nodes.length.toLocaleString()} 节点 / ${mockGraph.edges.length.toLocaleString()} 关系`);
-  }, []);
-
   useEffect(() => {
     if (autoRefresh) refresh();
   }, [autoRefresh, refresh]);
 
-  return { data, setData, source, setSource, loading, setLoading, error, setError, status, setStatus, refresh, importExcel, importCsv, loadMock };
+  return { data, setData, source, setSource, loading, setLoading, error, setError, status, setStatus, refresh, importExcel, importCsv };
 }

@@ -1,4 +1,4 @@
-import { GraphData, GraphViewResponse } from '../types/graph';
+import { CommunityMethod, DatabaseImportResponse, GraphData, GraphViewResponse, ImportanceFormula, ImportanceTemplate, ImportPreviewJob } from '../types/graph';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
 
@@ -33,6 +33,90 @@ export async function uploadCsv(nodesFile?: File, edgesFile?: File): Promise<Gra
   const response = await fetch(`${API_BASE}/api/import/csv`, { method: 'POST', body: form });
   if (!response.ok) throw await apiError(response, 'CSV import failed');
   return response.json();
+}
+
+function appendImportFiles(form: FormData, files: File[]) {
+  const excelFile = files.find((file) => /\.(xlsx|xls)$/i.test(file.name));
+  if (excelFile) {
+    form.append('file', excelFile);
+    return;
+  }
+
+  const csvFiles = files.filter((file) => /\.csv$/i.test(file.name));
+  const nodesFile = csvFiles.find((file) => /node|节点/i.test(file.name));
+  const edgesFile = csvFiles.find((file) => /edge|relation|关系|边/i.test(file.name));
+
+  if (nodesFile) form.append('nodes_file', nodesFile);
+  if (edgesFile) form.append('edges_file', edgesFile);
+  if (!nodesFile && !edgesFile && csvFiles[0]) form.append('file', csvFiles[0]);
+}
+
+function appendImportanceFormula(form: FormData, importanceFormula?: ImportanceFormula) {
+  if (!importanceFormula?.components?.length) return;
+  form.append('importance_formula', JSON.stringify(importanceFormula));
+}
+
+async function submitDatabaseImport(
+  path: 'preview' | 'commit',
+  files: File[],
+  communityMethod: CommunityMethod,
+  importanceTemplate: ImportanceTemplate,
+  importanceFormula?: ImportanceFormula,
+): Promise<DatabaseImportResponse> {
+  const form = new FormData();
+  appendImportFiles(form, files);
+  form.append('community_method', communityMethod);
+  form.append('importance_template', importanceTemplate);
+  appendImportanceFormula(form, importanceFormula);
+  const response = await fetch(`${API_BASE}/api/import/database/${path}`, { method: 'POST', body: form });
+  if (!response.ok) throw await apiError(response, path === 'preview' ? 'Import preview failed' : 'Database import failed');
+  return response.json();
+}
+
+export async function previewDatabaseImport(
+  files: File[],
+  communityMethod: CommunityMethod,
+  importanceTemplate: ImportanceTemplate,
+  importanceFormula?: ImportanceFormula,
+): Promise<DatabaseImportResponse> {
+  return submitDatabaseImport('preview', files, communityMethod, importanceTemplate, importanceFormula);
+}
+
+export async function createDatabasePreviewJob(
+  files: File[],
+  communityMethod: CommunityMethod,
+  importanceTemplate: ImportanceTemplate,
+  importanceFormula?: ImportanceFormula,
+): Promise<ImportPreviewJob> {
+  const form = new FormData();
+  appendImportFiles(form, files);
+  form.append('community_method', communityMethod);
+  form.append('importance_template', importanceTemplate);
+  appendImportanceFormula(form, importanceFormula);
+  const response = await fetch(`${API_BASE}/api/import/database/preview-jobs`, { method: 'POST', body: form });
+  if (!response.ok) throw await apiError(response, 'Import preview job failed');
+  return response.json();
+}
+
+export async function fetchDatabasePreviewJob(jobId: string): Promise<ImportPreviewJob> {
+  const response = await fetch(`${API_BASE}/api/import/database/preview-jobs/${encodeURIComponent(jobId)}`);
+  if (!response.ok) throw await apiError(response, 'Import preview job status failed');
+  return response.json();
+}
+
+export async function cancelDatabasePreviewJob(jobId: string): Promise<ImportPreviewJob> {
+  const response = await fetch(`${API_BASE}/api/import/database/preview-jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+  if (!response.ok) throw await apiError(response, 'Import preview cancel failed');
+  return response.json();
+}
+
+export async function commitDatabaseImport(
+  files: File[],
+  communityMethod: CommunityMethod,
+  importanceTemplate: ImportanceTemplate,
+  importanceFormula?: ImportanceFormula,
+): Promise<DatabaseImportResponse> {
+  return submitDatabaseImport('commit', files, communityMethod, importanceTemplate, importanceFormula);
 }
 
 export async function fetchUniverseView(): Promise<GraphViewResponse> {

@@ -1,9 +1,11 @@
-import { ArrowLeft, Database, Download, FileUp, LocateFixed, Lock, RefreshCw, RotateCcw, Unlock, ZoomIn, ZoomOut } from 'lucide-react';
-import { GraphNode, GraphViewState } from '../types/graph';
+import { ArrowLeft, Database, Download, Eye, EyeOff, FileUp, LocateFixed, Lock, RefreshCw, Unlock, ZoomIn, ZoomOut } from 'lucide-react';
+import { GraphNode, GraphViewState, NodeSearchResult } from '../types/graph';
 import { SearchBox } from './SearchBox';
 
 type Props = {
   nodes: GraphNode[];
+  databaseResults: NodeSearchResult[];
+  searching: boolean;
   query: string;
   loading: boolean;
   source: string;
@@ -12,15 +14,15 @@ type Props = {
   viewState?: GraphViewState;
   canGoBack: boolean;
   viewLocked: boolean;
+  showNodeLabels: boolean;
   onQueryChange: (query: string) => void;
   onPickNode: (node: GraphNode) => void;
   onSubmitQuery: () => void;
   onRefresh: () => void;
   onBack: () => void;
   onToggleViewLock: () => void;
-  onLoadMock: () => void;
-  onImportExcel: (file: File) => void;
-  onImportCsv: (files: File[]) => void;
+  onToggleNodeLabels: () => void;
+  onOpenImport: () => void;
   onExport: () => void;
   onFitView: () => void;
   onZoomIn: () => void;
@@ -29,6 +31,8 @@ type Props = {
 
 export function TopBar({
   nodes,
+  databaseResults,
+  searching,
   query,
   loading,
   source,
@@ -37,15 +41,15 @@ export function TopBar({
   viewState,
   canGoBack,
   viewLocked,
+  showNodeLabels,
   onQueryChange,
   onPickNode,
   onSubmitQuery,
   onRefresh,
   onBack,
   onToggleViewLock,
-  onLoadMock,
-  onImportExcel,
-  onImportCsv,
+  onToggleNodeLabels,
+  onOpenImport,
   onExport,
   onFitView,
   onZoomIn,
@@ -60,13 +64,18 @@ export function TopBar({
           <small>NebulaNet</small>
         </div>
       </div>
-      <SearchBox nodes={nodes} value={query} onChange={onQueryChange} onPick={onPickNode} onSubmit={onSubmitQuery} />
+      <SearchBox
+        nodes={nodes}
+        databaseResults={databaseResults}
+        searching={searching}
+        value={query}
+        onChange={onQueryChange}
+        onPick={onPickNode}
+        onSubmit={onSubmitQuery}
+      />
       <div className="top-actions">
         <button type="button" title="返回上一个视图" onClick={onBack} disabled={!canGoBack}>
           <ArrowLeft size={16} />
-        </button>
-        <button type="button" title="切回内置 Mock 数据" onClick={onLoadMock}>
-          <RotateCcw size={16} />
         </button>
         <div className={`data-status ${error ? 'error' : loading ? 'loading' : ''}`} title={error || status || source}>
           <Database size={14} />
@@ -88,22 +97,17 @@ export function TopBar({
         <button type="button" title="刷新数据" onClick={onRefresh}>
           <RefreshCw size={16} className={loading ? 'spin' : ''} />
         </button>
-        <label className="icon-button" title="导入 Excel / CSV">
+        <button
+          className={showNodeLabels ? 'active' : undefined}
+          type="button"
+          title={showNodeLabels ? '隐藏节点名称' : '显示节点名称'}
+          onClick={onToggleNodeLabels}
+        >
+          {showNodeLabels ? <Eye size={16} /> : <EyeOff size={16} />}
+        </button>
+        <button type="button" title="导入数据" onClick={onOpenImport}>
           <FileUp size={16} />
-          <input
-            type="file"
-            accept=".xlsx,.xls,.csv"
-            multiple
-            onChange={(event) => {
-              const files = Array.from(event.target.files ?? []);
-              const excelFile = files.find((file) => /\.(xlsx|xls)$/i.test(file.name));
-              const csvFiles = files.filter((file) => /\.csv$/i.test(file.name));
-              if (excelFile) onImportExcel(excelFile);
-              else if (csvFiles.length) onImportCsv(csvFiles);
-              event.target.value = '';
-            }}
-          />
-        </label>
+        </button>
         <button type="button" title="放大" onClick={onZoomIn}>
           <ZoomIn size={16} />
         </button>

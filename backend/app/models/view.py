@@ -22,5 +22,7 @@ class CommunitySummary(BaseModel):
 class GraphViewResponse(GraphData):
     view_level: str = "L0"
     title: str = ""
+    can_drill: bool = True
+    complete: bool = False
     communities: list[CommunitySummary] = Field(default_factory=list)
     stats: ViewStats = Field(default_factory=ViewStats)

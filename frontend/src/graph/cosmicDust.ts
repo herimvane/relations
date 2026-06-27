@@ -85,7 +85,7 @@ function createNebulaClouds(cloudTextures: THREE.Texture[]) {
         map: cloudTextures[index % cloudTextures.length],
         color: cloudColors[index % cloudColors.length],
         transparent: true,
-        opacity: 0.024 + hashUnit(`${node.id}-cloud-opacity-${index}`) * 0.04 + (index === 0 ? 0.018 : 0),
+        opacity: 0.018 + hashUnit(`${node.id}-cloud-opacity-${index}`) * 0.028 + (index === 0 ? 0.012 : 0),
         blending: THREE.NormalBlending,
         depthTest: false,
         depthWrite: false

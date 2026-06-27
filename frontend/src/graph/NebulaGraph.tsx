@@ -12,9 +12,11 @@ type Props = {
   selectedNodeId?: string;
   focusedNodeId?: string;
   highlightedPath?: GraphPath;
+  focusNonce?: number;
   viewCommand?: GraphViewCommand;
   relationTypes: string[];
   minWeight: number;
+  showLabels: boolean;
   onSelectNode: (node: GraphNode) => void;
   onHoverNode: (node?: GraphNode) => void;
   onCanvasReady?: (canvas: HTMLCanvasElement) => void;
@@ -50,6 +52,30 @@ type GraphRuntime = {
   layout: NodePosition[];
 };
 
+type GraphEntryTransition = {
+  active: boolean;
+  frameApplied: boolean;
+  startTime: number;
+  duration: number;
+  origin: THREE.Vector3;
+  finalFrame?: FitChoice;
+  nodeStartScale: number;
+  edgeStartScale: number;
+  nodeGroup: THREE.Group;
+  edgeGroup: THREE.Group;
+  particleGroup: THREE.Group;
+  dustGroup: THREE.Group;
+  stars: THREE.Points;
+  backgroundDust: THREE.Points;
+};
+
+type FocusVisuals = {
+  nodes: Map<string, THREE.Sprite[]>;
+  labels: Map<string, THREE.Sprite>;
+  edges: Array<{ edge: GraphData['edges'][number]; material: THREE.Material & { opacity: number }; activeOpacity: number; inactiveOpacity: number }>;
+  particles: Array<{ edge: GraphData['edges'][number]; material: THREE.SpriteMaterial; activeOpacity: number; inactiveOpacity: number }>;
+};
+
 const DEFAULT_ROOT_ROTATION = new THREE.Euler(-0.32, 0.38, -0.04);
 const COMMUNITY_ROOT_ROTATION = new THREE.Euler(-0.48, 0.66, -0.06);
 const LARGE_GRAPH_NODE_THRESHOLD = 2500;
@@ -62,7 +88,97 @@ const MAX_CAMERA_Z = 2750;
 const CAMERA_Y_OFFSET = 24;
 const ZOOM_IN_FACTOR = 0.84;
 const ZOOM_OUT_FACTOR = 1.18;
+const DRILL_TRANSITION_DURATION = 1180;
 let cachedNebulaCloudTextures: THREE.CanvasTexture[] | undefined;
+
+function clamp01(value: number) {
+  return THREE.MathUtils.clamp(value, 0, 1);
+}
+
+function easeOutCubic(value: number) {
+  const t = clamp01(value);
+  return 1 - Math.pow(1 - t, 3);
+}
+
+function easeInOutCubic(value: number) {
+  const t = clamp01(value);
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function materialList(material: THREE.Material | THREE.Material[]) {
+  return Array.isArray(material) ? material : [material];
+}
+
+function edgeTouchesFocus(edge: { source: string; target: string }, selectedId?: string, focusedId?: string) {
+  return Boolean(
+    (selectedId && (edge.source === selectedId || edge.target === selectedId)) ||
+    (focusedId && (edge.source === focusedId || edge.target === focusedId))
+  );
+}
+
+function rememberBaseOpacity(object: THREE.Object3D) {
+  object.traverse((child) => {
+    const material = (child as THREE.Object3D & { material?: THREE.Material | THREE.Material[] }).material;
+    if (!material) return;
+    materialList(material).forEach((item) => {
+      if (!('opacity' in item)) return;
+      item.userData.baseOpacity ??= item.opacity;
+      item.transparent = true;
+    });
+  });
+}
+
+function setObjectOpacityScale(object: THREE.Object3D, scale: number) {
+  object.traverse((child) => {
+    const material = (child as THREE.Object3D & { material?: THREE.Material | THREE.Material[] }).material;
+    if (!material) return;
+    materialList(material).forEach((item) => {
+      if (!('opacity' in item)) return;
+      const baseOpacity = typeof item.userData.baseOpacity === 'number' ? item.userData.baseOpacity : item.opacity;
+      item.opacity = baseOpacity * clamp01(scale);
+    });
+  });
+}
+
+function setGroupExpansion(group: THREE.Group, origin: THREE.Vector3, scale: number) {
+  group.scale.setScalar(scale);
+  group.position.copy(origin).multiplyScalar(1 - scale);
+}
+
+function setMaterialOpacity(material: THREE.Material & { opacity: number }, opacity: number) {
+  material.opacity = opacity;
+  material.transparent = true;
+}
+
+function transitionOrigin(origin: GraphViewCommand['origin'] | undefined, center: THREE.Vector3) {
+  if (!origin || !Number.isFinite(origin.x) || !Number.isFinite(origin.y) || !Number.isFinite(origin.z)) {
+    return center.clone();
+  }
+  const source = new THREE.Vector3(origin.x, origin.y, origin.z);
+  const offset = source.sub(center);
+  if (offset.length() > 180) offset.setLength(180);
+  return center.clone().add(offset.multiplyScalar(0.45));
+}
+
+function fadeOutRetainedCanvas(mount: HTMLDivElement, renderer: THREE.WebGLRenderer) {
+  const canvas = renderer.domElement;
+  canvas.classList.add('nebula-exit-canvas');
+  canvas.style.transition = 'none';
+  canvas.style.opacity = '1';
+  canvas.style.pointerEvents = 'none';
+  canvas.style.zIndex = '4';
+  void canvas.offsetWidth;
+  canvas.style.transition = 'opacity 640ms cubic-bezier(0.22, 1, 0.36, 1)';
+  requestAnimationFrame(() => {
+    canvas.style.opacity = '0';
+  });
+  window.setTimeout(() => {
+    renderer.dispose();
+    if (canvas.parentElement === mount) {
+      mount.removeChild(canvas);
+    }
+  }, 720);
+}
 
 function makeHitMaterial() {
   return new THREE.MeshBasicMaterial({
@@ -173,6 +289,132 @@ function makeNebulaCloudTexture(seed = Math.random().toString(36).slice(2)) {
 function getNebulaCloudTextures() {
   cachedNebulaCloudTextures ??= Array.from({ length: 4 }, (_, index) => makeNebulaCloudTexture(`nebula-${index}-${Math.random()}`));
   return cachedNebulaCloudTextures;
+}
+
+function createDistantStarField(texture: THREE.Texture, seed: string) {
+  const random = seededRandom(`distant-stars-${seed}`);
+  const starCount = 3000;
+  const positions = new Float32Array(starCount * 3);
+  const colors = new Float32Array(starCount * 3);
+  const palette = [
+    new THREE.Color('#f8fbff'),
+    new THREE.Color('#dcecff'),
+    new THREE.Color('#c5fff4'),
+    new THREE.Color('#fff2c8'),
+    new THREE.Color('#ffd7d1')
+  ];
+
+  for (let index = 0; index < starCount; index += 1) {
+    const edgeBias = random();
+    const spreadX = 1800 + edgeBias * 1850;
+    const spreadY = 980 + edgeBias * 1080;
+    positions[index * 3] = (random() - 0.5) * spreadX;
+    positions[index * 3 + 1] = (random() - 0.5) * spreadY;
+    positions[index * 3 + 2] = -1120 - random() * 1050;
+    const color = palette[Math.floor(random() * palette.length)].clone();
+    const dim = 0.52 + random() * 0.52;
+    colors[index * 3] = color.r * dim;
+    colors[index * 3 + 1] = color.g * dim;
+    colors[index * 3 + 2] = color.b * dim;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const field = new THREE.Points(
+    geometry,
+    new THREE.PointsMaterial({
+      map: texture,
+      vertexColors: true,
+      size: 1.85,
+      transparent: true,
+      opacity: 0.2,
+      alphaTest: 0.018,
+      depthWrite: false
+    })
+  );
+  field.renderOrder = -4;
+  return field;
+}
+
+function createWideCosmicDust(texture: THREE.Texture, seed: string) {
+  const random = seededRandom(`wide-dust-${seed}`);
+  const dustCount = 2200;
+  const positions = new Float32Array(dustCount * 3);
+  const colors = new Float32Array(dustCount * 3);
+  const cool = new THREE.Color('#9aa6bb');
+  const teal = new THREE.Color('#b8fff3');
+  const amber = new THREE.Color('#ffe8d6');
+
+  for (let index = 0; index < dustCount; index += 1) {
+    const lane = random() < 0.64;
+    const x = (random() - 0.5) * 3350;
+    const yBase = lane ? Math.sin(x * 0.0016 + random() * 1.2) * 155 : 0;
+    positions[index * 3] = x;
+    positions[index * 3 + 1] = yBase + (random() - 0.5) * (lane ? 1050 : 1760);
+    positions[index * 3 + 2] = -660 - random() * 1160;
+    const color = cool.clone().lerp(random() > 0.72 ? teal : amber, random() * 0.22);
+    const dim = 0.34 + random() * 0.42;
+    colors[index * 3] = color.r * dim;
+    colors[index * 3 + 1] = color.g * dim;
+    colors[index * 3 + 2] = color.b * dim;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const dust = new THREE.Points(
+    geometry,
+    new THREE.PointsMaterial({
+      map: texture,
+      vertexColors: true,
+      size: 2.35,
+      transparent: true,
+      opacity: 0.075,
+      alphaTest: 0.012,
+      depthWrite: false
+    })
+  );
+  dust.renderOrder = -3;
+  return dust;
+}
+
+function createDarkNebulaVeil(cloudTextures: THREE.Texture[], seed: string) {
+  const random = seededRandom(`dark-veil-${seed}`);
+  const group = new THREE.Group();
+  const colors = [new THREE.Color('#5c6f7a'), new THREE.Color('#7d6f84'), new THREE.Color('#43556f')];
+  for (let index = 0; index < 7; index += 1) {
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: cloudTextures[index % cloudTextures.length],
+        color: colors[index % colors.length],
+        transparent: true,
+        opacity: index < 2 ? 0.033 : 0.022,
+        blending: THREE.NormalBlending,
+        depthTest: false,
+        depthWrite: false
+      })
+    );
+    const width = 680 + random() * 1080;
+    const height = 190 + random() * 420;
+    sprite.scale.set(width, height, 1);
+    sprite.position.set((random() - 0.5) * 2450, (random() - 0.5) * 1380, -980 - random() * 720);
+    sprite.rotation.z = -0.48 + (random() - 0.5) * 1.4;
+    sprite.renderOrder = -2;
+    sprite.userData = {
+      baseX: sprite.position.x,
+      baseY: sprite.position.y,
+      baseZ: sprite.position.z,
+      baseRotation: sprite.rotation.z,
+      baseScaleX: sprite.scale.x,
+      baseScaleY: sprite.scale.y,
+      phase: random() * Math.PI * 2,
+      drift: 8 + random() * 18,
+      rotationSpeed: (random() - 0.5) * 0.00008
+    };
+    group.add(sprite);
+  }
+  return group;
 }
 
 function makeStarburstTexture() {
@@ -355,9 +597,13 @@ function makeCommunityRegionTexture() {
 }
 
 function makeNodeLabelTexture(name: string) {
-  const text = Array.from(name).slice(0, 5).join('');
+  const text = name;
+  const measureCanvas = document.createElement('canvas');
+  const measureCtx = measureCanvas.getContext('2d')!;
+  measureCtx.font = '600 24px Inter, "PingFang SC", sans-serif';
+  const textWidth = Math.ceil(measureCtx.measureText(text).width);
   const canvas = document.createElement('canvas');
-  canvas.width = 192;
+  canvas.width = THREE.MathUtils.clamp(textWidth + 44, 128, 520);
   canvas.height = 64;
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -381,10 +627,14 @@ function makeNodeLabelTexture(name: string) {
 }
 
 function makeCommunityLabelTexture(name: string, count: unknown) {
-  const title = Array.from(name.replace(/^社交关系大图\s*|^企业\/风控关系图\s*/g, '')).slice(0, 6).join('');
+  const title = name.replace(/^社交关系大图\s*|^企业\/风控关系图\s*/g, '');
   const subtitle = `${Number(count ?? 0).toLocaleString()} nodes`;
+  const measureCanvas = document.createElement('canvas');
+  const measureCtx = measureCanvas.getContext('2d')!;
+  measureCtx.font = '700 21px Inter, "PingFang SC", sans-serif';
+  const titleWidth = Math.ceil(measureCtx.measureText(title).width);
   const canvas = document.createElement('canvas');
-  canvas.width = 256;
+  canvas.width = THREE.MathUtils.clamp(titleWidth + 56, 180, 560);
   canvas.height = 78;
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -508,33 +758,46 @@ function createFitView(
   padding = 1.4,
   minFrame = 460,
   minCameraZ = 320,
-  maxCameraZ = MAX_CAMERA_Z
+  maxCameraZ = MAX_CAMERA_Z,
+  trimQuantile = 0
 ): FitView {
   if (nodes.length === 0) {
     return { center: new THREE.Vector3(), cameraZ: 720 };
   }
 
   const points = nodes.map((node) => vecFromNode(node).applyEuler(rotation).multiplyScalar(scale));
-  const box = new THREE.Box3().setFromPoints(points);
+  const framePoints = trimQuantile > 0 && points.length > 24 ? trimPointCloud(points, trimQuantile) : points;
+  const box = new THREE.Box3().setFromPoints(framePoints);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const spriteMargin = Math.max(28, Math.min(88, padding * 36));
   const vertical = Math.max(size.y + spriteMargin, (size.x + spriteMargin) / Math.max(aspect, 0.1), minFrame);
   const fovRadians = THREE.MathUtils.degToRad(fov);
   const distance = (vertical * padding) / (2 * Math.tan(fovRadians / 2));
-  const depthAllowance = Math.max(0, size.z * 0.5);
+  const depthAllowance = Math.max(0, size.z * 0.34);
   return {
     center,
     cameraZ: THREE.MathUtils.clamp(distance + depthAllowance, minCameraZ, maxCameraZ)
   };
 }
 
-function overviewPadding(nodeCount: number) {
-  return THREE.MathUtils.clamp(1.08 + nodeCount / 2600, 1.1, 1.28);
-}
-
-function focusPadding(nodeCount: number) {
-  return THREE.MathUtils.clamp(1.14 + nodeCount / 620, 1.18, 1.4);
+function trimPointCloud(points: THREE.Vector3[], trimQuantile: number) {
+  const lower = THREE.MathUtils.clamp(trimQuantile, 0, 0.2);
+  const upper = 1 - lower;
+  const pick = (values: number[], ratio: number) => values[Math.min(values.length - 1, Math.max(0, Math.floor((values.length - 1) * ratio)))];
+  const xs = points.map((point) => point.x).sort((a, b) => a - b);
+  const ys = points.map((point) => point.y).sort((a, b) => a - b);
+  const zs = points.map((point) => point.z).sort((a, b) => a - b);
+  const minX = pick(xs, lower);
+  const maxX = pick(xs, upper);
+  const minY = pick(ys, lower);
+  const maxY = pick(ys, upper);
+  const minZ = pick(zs, lower);
+  const maxZ = pick(zs, upper);
+  const trimmed = points.filter(
+    (point) => point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY && point.z >= minZ && point.z <= maxZ
+  );
+  return trimmed.length >= Math.max(8, points.length * 0.5) ? trimmed : points;
 }
 
 type FitChoice = FitView & {
@@ -549,7 +812,10 @@ type AutoFrameOptions = {
   maxCameraZ?: number;
   preferDepth?: number;
   rotationDamping?: number;
+  trimQuantile?: number;
 };
+
+type FrameMode = 'overview' | 'focus' | 'path' | 'drill' | 'drill-view';
 
 function rotationCandidates(currentRotation: THREE.Euler) {
   const baseY = currentRotation.y;
@@ -588,7 +854,8 @@ function rotationDistance(a: THREE.Euler, b: THREE.Euler) {
 
 function fitScore(nodes: NodePosition[], rotation: THREE.Euler, fit: FitView, aspect: number, scale: number, currentRotation: THREE.Euler, options: AutoFrameOptions) {
   const points = nodes.map((node) => vecFromNode(node).applyEuler(rotation).multiplyScalar(scale));
-  const box = new THREE.Box3().setFromPoints(points);
+  const framePoints = options.trimQuantile && points.length > 24 ? trimPointCloud(points, options.trimQuantile) : points;
+  const box = new THREE.Box3().setFromPoints(framePoints);
   const size = box.getSize(new THREE.Vector3());
   const width = Math.max(size.x, 1);
   const height = Math.max(size.y, 1);
@@ -616,14 +883,95 @@ function chooseAutoFrameView(
 
   const candidates = nodes.length < 3 ? [currentRotation.clone(), DEFAULT_ROOT_ROTATION.clone()] : rotationCandidates(currentRotation);
   return candidates.reduce<FitChoice | undefined>((best, rotation) => {
-    const fit = createFitView(nodes, rotation, aspect, fov, scale, options.padding, options.minFrame, options.minCameraZ, options.maxCameraZ ?? MAX_CAMERA_Z);
+    const fit = createFitView(
+      nodes,
+      rotation,
+      aspect,
+      fov,
+      scale,
+      options.padding,
+      options.minFrame,
+      options.minCameraZ,
+      options.maxCameraZ ?? MAX_CAMERA_Z,
+      options.trimQuantile ?? 0
+    );
     const choice = { ...fit, rotation, score: fitScore(nodes, rotation, fit, aspect, scale, currentRotation, options) };
     if (!best) return choice;
     return choice.score < best.score ? choice : best;
   }, undefined)!;
 }
 
-const chooseBestFitView = chooseAutoFrameView;
+function computeBestViewFrame(
+  nodes: NodePosition[],
+  currentRotation: THREE.Euler,
+  aspect: number,
+  fov: number,
+  scale: number,
+  options: {
+    mode: FrameMode;
+    communityView: boolean;
+    nodeCount: number;
+    baseRotation?: THREE.Euler;
+  }
+) {
+  const fallbackRotation = options.baseRotation ?? currentRotation;
+  if (nodes.length === 0) {
+    return { center: new THREE.Vector3(), cameraZ: 720, rotation: fallbackRotation.clone(), score: 0 };
+  }
+
+  const compactOverviewPadding = THREE.MathUtils.clamp(1.04 + options.nodeCount / 6200, 1.06, 1.18);
+  const compactFocusPadding = THREE.MathUtils.clamp(1.02 + nodes.length / 1100, 1.06, 1.2);
+  const standardMinFrame = options.communityView ? 315 : 295;
+  const standardMinCameraZ = options.communityView ? 380 : 370;
+  const standardMaxCameraZ = options.communityView ? 1160 : 1320;
+  const standardSafetyScale = 1.06;
+  const modeConfig = {
+    overview: {
+      padding: Math.max(1.06, compactOverviewPadding - 0.015),
+      minFrame: standardMinFrame,
+      minCameraZ: standardMinCameraZ,
+      maxCameraZ: standardMaxCameraZ,
+      preferDepth: options.communityView ? 0.2 : 0.16,
+      rotationDamping: 5,
+      trimQuantile: options.nodeCount > 80 ? (options.communityView ? 0.012 : 0.035) : 0.01
+    },
+    focus: {
+      padding: Math.max(1.08, compactFocusPadding),
+      minFrame: standardMinFrame,
+      minCameraZ: standardMinCameraZ,
+      maxCameraZ: standardMaxCameraZ,
+      preferDepth: options.communityView ? 0.22 : 0.18,
+      rotationDamping: 7
+    },
+    path: {
+      padding: Math.max(1.08, compactFocusPadding),
+      minFrame: standardMinFrame,
+      minCameraZ: standardMinCameraZ,
+      maxCameraZ: standardMaxCameraZ,
+      preferDepth: 0.2,
+      rotationDamping: 7
+    },
+    drill: {
+      padding: 1.14,
+      minFrame: 260,
+      minCameraZ: 320,
+      maxCameraZ: 980,
+      preferDepth: 0.16,
+      rotationDamping: 10
+    },
+    'drill-view': {
+      padding: Math.max(1.08, compactOverviewPadding),
+      minFrame: standardMinFrame,
+      minCameraZ: standardMinCameraZ,
+      maxCameraZ: standardMaxCameraZ,
+      preferDepth: options.communityView ? 0.22 : 0.18,
+      rotationDamping: 4
+    }
+  } satisfies Record<FrameMode, AutoFrameOptions>;
+
+  const fit = chooseAutoFrameView(nodes, fallbackRotation, aspect, fov, scale, modeConfig[options.mode]);
+  return { ...fit, cameraZ: Math.max(MIN_CAMERA_Z, fit.cameraZ * standardSafetyScale) };
+}
 
 function graphDataSignature(data: GraphData) {
   const firstNode = data.nodes[0]?.id ?? '';
@@ -650,6 +998,16 @@ function representativeOverviewNodes(nodes: NodePosition[], edges: GraphData['ed
   return Array.from(new Map([...ranked, ...extremes].map((node) => [node.id, node])).values());
 }
 
+function representativeDrillNodes(nodes: NodePosition[], edges: GraphData['edges']) {
+  if (nodes.length <= 16) return nodes;
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const ranked = rankCoreNodes({ nodes, edges })
+    .map((item) => nodeMap.get(item.node.id))
+    .filter((node): node is NodePosition => Boolean(node));
+  const limit = THREE.MathUtils.clamp(Math.round(nodes.length * 0.58), 18, 96);
+  return ranked.slice(0, limit);
+}
+
 function isCommunityView(data: GraphData) {
   return data.nodes.length > 0 && data.nodes.every(isCommunityNode);
 }
@@ -659,9 +1017,11 @@ export function NebulaGraph({
   selectedNodeId,
   focusedNodeId,
   highlightedPath,
+  focusNonce,
   viewCommand,
   relationTypes,
   minWeight,
+  showLabels,
   onSelectNode,
   onHoverNode,
   onCanvasReady
@@ -672,7 +1032,14 @@ export function NebulaGraph({
   const viewStateRef = useRef<ViewState>();
   const focusTargetRef = useRef<FocusTarget>();
   const runtimeRef = useRef<GraphRuntime>();
+  const graphTransitionRef = useRef<GraphEntryTransition>();
   const viewCommandRef = useRef(viewCommand);
+  const showLabelsRef = useRef(showLabels);
+  const onSelectNodeRef = useRef(onSelectNode);
+  const onHoverNodeRef = useRef(onHoverNode);
+  const onCanvasReadyRef = useRef(onCanvasReady);
+  const updateFocusVisualsRef = useRef<((selectedId?: string, focusedId?: string, path?: GraphPath) => void) | undefined>();
+  const labelSpritesRef = useRef<THREE.Sprite[]>([]);
   const visibleRelations = useMemo(() => new Set(relationTypes), [relationTypes]);
   const layout = useMemo(() => createForceLayout(data), [data]);
   const nodeTierIndex = useMemo(() => buildNodeTierIndex(data), [data]);
@@ -685,31 +1052,47 @@ export function NebulaGraph({
   }, [selectedNodeId, focusedNodeId]);
 
   useEffect(() => {
+    onSelectNodeRef.current = onSelectNode;
+    onHoverNodeRef.current = onHoverNode;
+    onCanvasReadyRef.current = onCanvasReady;
+  }, [onCanvasReady, onHoverNode, onSelectNode]);
+
+  useEffect(() => {
     viewCommandRef.current = viewCommand;
   }, [viewCommand]);
 
   useEffect(() => {
+    showLabelsRef.current = showLabels;
+    updateFocusVisualsRef.current?.(selectedNodeId, focusedNodeId, highlightedPath);
+    if (updateFocusVisualsRef.current) return;
+    labelSpritesRef.current.forEach((sprite) => {
+      const material = sprite.material as THREE.SpriteMaterial;
+      const baseOpacity = typeof material.userData.baseOpacity === 'number' ? material.userData.baseOpacity : material.opacity;
+      material.userData.baseOpacity = baseOpacity;
+      material.opacity = showLabels ? baseOpacity : 0;
+    });
+  }, [focusedNodeId, highlightedPath, selectedNodeId, showLabels]);
+
+  useEffect(() => {
     const runtime = runtimeRef.current;
     if (!runtime) return;
+    updateFocusVisualsRef.current?.(selectedNodeId, focusedNodeId, highlightedPath);
 
     const pathNodeIds = new Set(highlightedPath?.nodes.map((node) => node.id) ?? []);
     if (pathNodeIds.size > 0) {
       const pathNodes = Array.from(pathNodeIds)
         .map((id) => runtime.nodeMap.get(id))
         .filter((node): node is NodePosition => Boolean(node));
-      const focusFit = chooseBestFitView(
+      const focusFit = computeBestViewFrame(
         pathNodes,
         runtime.root.rotation,
         runtime.camera.aspect,
         runtime.cameraFov,
         runtime.root.scale.x,
         {
-          padding: Math.max(1.22, focusPadding(pathNodes.length)),
-          minFrame: 520,
-          minCameraZ: communityView ? 620 : 640,
-          maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
-          preferDepth: 0.18,
-          rotationDamping: 9
+          mode: 'path',
+          communityView,
+          nodeCount: data.nodes.length
         }
       );
       focusTargetRef.current = {
@@ -732,19 +1115,17 @@ export function NebulaGraph({
     const focusNodes = Array.from(activeIds)
       .map((id) => runtime.nodeMap.get(id))
       .filter((node): node is NodePosition => Boolean(node));
-    const focusFit = chooseBestFitView(
+    if (focusNodes.length === 0) return;
+    const focusFit = computeBestViewFrame(
       focusNodes,
       runtime.root.rotation,
       runtime.camera.aspect,
       runtime.cameraFov,
       runtime.root.scale.x,
       {
-        padding: focusPadding(focusNodes.length),
-        minFrame: 560,
-        minCameraZ: communityView ? 620 : 660,
-        maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
-        preferDepth: communityView ? 0.18 : 0.13,
-        rotationDamping: 10
+        mode: 'focus',
+        communityView,
+        nodeCount: data.nodes.length
       }
     );
     focusTargetRef.current = {
@@ -754,18 +1135,23 @@ export function NebulaGraph({
       rotation: focusFit.rotation,
       active: true
     };
-  }, [communityView, data, focusedNodeId, highlightedPath, selectedNodeId]);
+  }, [communityView, data, focusNonce, focusedNodeId, highlightedPath, selectedNodeId]);
 
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return undefined;
+    labelSpritesRef.current = [];
 
     const scene = new THREE.Scene();
     scene.fog = new THREE.FogExp2(nebulaTheme.background.fog, 0.00072);
 
     const cameraFov = communityView ? 53 : 48;
     const camera = new THREE.PerspectiveCamera(cameraFov, mount.clientWidth / mount.clientHeight, 1, 4200);
-    const savedView = viewStateRef.current?.dataSignature === dataSignature ? viewStateRef.current : undefined;
+    const commandAtMount = viewCommandRef.current;
+    const isDrillEntry = commandAtMount?.type === 'drill-in' || commandAtMount?.type === 'drill-out';
+    const isOverviewMount = !selectedNodeId && !focusedNodeId && !highlightedPath;
+    const rawSavedView = viewStateRef.current?.dataSignature === dataSignature ? viewStateRef.current : undefined;
+    const savedView = !isDrillEntry && !isOverviewMount ? rawSavedView : undefined;
     camera.position.set(0, CAMERA_Y_OFFSET, savedView?.cameraZ ?? (communityView ? 780 : 720));
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
@@ -773,7 +1159,7 @@ export function NebulaGraph({
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.setClearColor(new THREE.Color(nebulaTheme.background.canvas), 0);
     mount.appendChild(renderer.domElement);
-    onCanvasReady?.(renderer.domElement);
+    onCanvasReadyRef.current?.(renderer.domElement);
 
     const root = new THREE.Group();
     root.position.copy(savedView?.rootPosition ?? new THREE.Vector3(0, 0, 0));
@@ -781,33 +1167,36 @@ export function NebulaGraph({
     root.scale.setScalar(savedView?.rootScale ?? (communityView ? 0.86 : 0.88));
     scene.add(root);
 
-    if (!savedView) {
-      const initialFit = chooseAutoFrameView(
-        representativeOverviewNodes(layout, data.edges),
-        communityView ? COMMUNITY_ROOT_ROTATION : root.rotation,
-        camera.aspect,
-        cameraFov,
-        root.scale.x,
-        {
-          padding: overviewPadding(layout.length),
-          minFrame: communityView ? 400 : 360,
-          minCameraZ: communityView ? 520 : 500,
-          maxCameraZ: communityView ? 1380 : MAX_CAMERA_Z,
-          preferDepth: communityView ? 0.16 : 0.11,
-          rotationDamping: 6
-        }
-      );
+    let initialFit: FitChoice | undefined;
+    initialFit = computeBestViewFrame(
+      representativeOverviewNodes(layout, data.edges),
+      communityView ? COMMUNITY_ROOT_ROTATION : root.rotation,
+      camera.aspect,
+      cameraFov,
+      root.scale.x,
+      {
+        mode: 'overview',
+        communityView,
+        nodeCount: layout.length,
+        baseRotation: communityView ? COMMUNITY_ROOT_ROTATION : root.rotation
+      }
+    );
+    if (!savedView || isOverviewMount) {
       root.rotation.copy(initialFit.rotation);
       root.position.set(-initialFit.center.x, -initialFit.center.y, -initialFit.center.z * (communityView ? 0.3 : 0.18));
-      const introCameraZ = Math.min(MAX_CAMERA_Z, Math.max(initialFit.cameraZ + 42, initialFit.cameraZ * 1.16));
+      const introCameraZ = isDrillEntry
+        ? Math.min(MAX_CAMERA_Z, Math.max(initialFit.cameraZ + 120, initialFit.cameraZ * 1.34))
+        : initialFit.cameraZ;
       camera.position.z = introCameraZ;
-      focusTargetRef.current = {
-        id: `initial-${dataSignature}`,
-        center: initialFit.center,
-        cameraZ: initialFit.cameraZ,
-        rotation: initialFit.rotation,
-        active: true
-      };
+      if (!isDrillEntry) {
+        focusTargetRef.current = {
+          id: `initial-${dataSignature}`,
+          center: initialFit.center,
+          cameraZ: initialFit.cameraZ,
+          rotation: initialFit.rotation,
+          active: true
+        };
+      }
     }
 
     const ambient = new THREE.AmbientLight(0xbfc9d9, 0.74);
@@ -819,18 +1208,6 @@ export function NebulaGraph({
     rim.position.set(-420, 280, 520);
     scene.add(rim);
 
-    const starGeo = new THREE.BufferGeometry();
-    const starCount = 1800;
-    const starPositions = new Float32Array(starCount * 3);
-    for (let i = 0; i < starCount; i += 1) {
-      const r = 520 + Math.random() * 1320;
-      const t = Math.random() * Math.PI * 2;
-      const p = Math.acos(2 * Math.random() - 1);
-      starPositions[i * 3] = r * Math.sin(p) * Math.cos(t);
-      starPositions[i * 3 + 1] = r * Math.sin(p) * Math.sin(t);
-      starPositions[i * 3 + 2] = r * Math.cos(p) - 260;
-    }
-    starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
     const glowTexture = makeGlowTexture();
     const dustTexture = makeDustTexture();
     const nebulaCloudTextures = getNebulaCloudTextures();
@@ -839,43 +1216,12 @@ export function NebulaGraph({
     const hotCoreTexture = makeHotCoreTexture();
     const rippleTexture = makeRippleTexture();
     const communityRegionTexture = makeCommunityRegionTexture();
-    const stars = new THREE.Points(
-      starGeo,
-      new THREE.PointsMaterial({
-        map: dustTexture,
-        color: 0xffffff,
-        size: 2.3,
-        transparent: true,
-        opacity: 0.18,
-        alphaTest: 0.02,
-        depthWrite: false
-      })
-    );
+
+    const darkVeil = createDarkNebulaVeil(nebulaCloudTextures, dataSignature);
+    scene.add(darkVeil);
+    const stars = createDistantStarField(dustTexture, dataSignature);
     scene.add(stars);
-    const dustGeo = new THREE.BufferGeometry();
-    const dustCount = 1200;
-    const dustPositions = new Float32Array(dustCount * 3);
-    for (let i = 0; i < dustCount; i += 1) {
-      const r = 760 + Math.random() * 1320;
-      const t = Math.random() * Math.PI * 2;
-      const p = Math.acos(2 * Math.random() - 1);
-      dustPositions[i * 3] = r * Math.sin(p) * Math.cos(t);
-      dustPositions[i * 3 + 1] = r * Math.sin(p) * Math.sin(t);
-      dustPositions[i * 3 + 2] = r * Math.cos(p) - 420;
-    }
-    dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
-    const dust = new THREE.Points(
-      dustGeo,
-      new THREE.PointsMaterial({
-        map: dustTexture,
-        color: nebulaTheme.background.dust,
-        size: 2.1,
-        transparent: true,
-        opacity: 0.08,
-        alphaTest: 0.015,
-        depthWrite: false
-      })
-    );
+    const dust = createWideCosmicDust(dustTexture, dataSignature);
     scene.add(dust);
 
     const nodeMap = new Map(layout.map((node) => [node.id, node]));
@@ -938,19 +1284,16 @@ export function NebulaGraph({
       const pathNodes = Array.from(pathNodeIds)
         .map((id) => nodeMap.get(id))
         .filter((node): node is NodePosition => Boolean(node));
-      const focusFit = chooseBestFitView(
+      const focusFit = computeBestViewFrame(
         pathNodes,
         root.rotation,
         camera.aspect,
         cameraFov,
         root.scale.x,
         {
-          padding: Math.max(1.08, focusPadding(pathNodes.length)),
-          minFrame: communityView ? 400 : 380,
-          minCameraZ: communityView ? 500 : 500,
-          maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
-          preferDepth: 0.18,
-          rotationDamping: 9
+          mode: 'path',
+          communityView,
+          nodeCount: layout.length
         }
       );
       focusTargetRef.current = {
@@ -964,19 +1307,16 @@ export function NebulaGraph({
       const focusNodes = Array.from(activeIds)
         .map((id) => nodeMap.get(id))
         .filter((node): node is NodePosition => Boolean(node));
-      const focusFit = chooseBestFitView(
+      const focusFit = computeBestViewFrame(
         focusNodes,
         root.rotation,
         camera.aspect,
         cameraFov,
         root.scale.x,
         {
-          padding: focusPadding(focusNodes.length),
-          minFrame: communityView ? 420 : 400,
-          minCameraZ: communityView ? 500 : 520,
-          maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
-          preferDepth: communityView ? 0.18 : 0.13,
-          rotationDamping: 10
+          mode: 'focus',
+          communityView,
+          nodeCount: layout.length
         }
       );
       focusTargetRef.current = {
@@ -999,6 +1339,17 @@ export function NebulaGraph({
     const particleGroup = new THREE.Group();
     const nodeGroup = new THREE.Group();
     root.add(dustGroup, edgeGroup, particleGroup, nodeGroup);
+    const focusVisuals: FocusVisuals = {
+      nodes: new Map(),
+      labels: new Map(),
+      edges: [],
+      particles: []
+    };
+    const registerNodeSprite = (nodeId: string, sprite: THREE.Sprite) => {
+      const sprites = focusVisuals.nodes.get(nodeId) ?? [];
+      sprites.push(sprite);
+      focusVisuals.nodes.set(nodeId, sprites);
+    };
 
     const largeActiveLinePositions: number[] = [];
     const largeActiveLineColors: number[] = [];
@@ -1076,7 +1427,7 @@ export function NebulaGraph({
           ? edgeTouches(edge, hoverIds)
         : largeGraph && hasSelection
           ? focusEdgeRefs.has(edge)
-          : !hasSelection || edgeTouches(edge, activeIds);
+          : !hasSelection || edgeTouchesFocus(edge, selectedNodeId, focusedNodeId);
       const color = hasPath && isPathEdge ? pathParticleColor : baseColor;
       const aggregateStrength = THREE.MathUtils.clamp(Math.log1p(aggregateEdgeCount) / 4.4, 0, 1);
       const aggregateColor = new THREE.Color('#65D6FF').lerp(new THREE.Color('#FFD54F'), aggregateStrength * 0.58);
@@ -1122,6 +1473,12 @@ export function NebulaGraph({
         const line = new THREE.Line(geometry, material);
         line.renderOrder = isActive ? 2 : 1;
         edgeGroup.add(line);
+        focusVisuals.edges.push({
+          edge,
+          material,
+          activeOpacity: Math.max(0.58, aggregateOpacity),
+          inactiveOpacity: 0.045
+        });
       }
 
         const animationLimit = hasPath ? 36 : hasSelection ? LARGE_GRAPH_FOCUS_ANIMATED_EDGE_LIMIT : LARGE_GRAPH_ANIMATED_EDGE_LIMIT;
@@ -1148,18 +1505,23 @@ export function NebulaGraph({
             speed
           };
           particleGroup.add(particle);
+          focusVisuals.particles.push({
+            edge,
+            material: particleMaterial,
+            activeOpacity: particleOpacity(true),
+            inactiveOpacity: 0.08
+          });
 
           for (let trailIndex = 1; trailIndex <= 3; trailIndex += 1) {
-            const trail = new THREE.Sprite(
-              new THREE.SpriteMaterial({
-                map: glowTexture,
-                color,
-                transparent: true,
-                opacity: trailOpacity(isActive) / trailIndex,
-                blending: THREE.AdditiveBlending,
-                depthWrite: false
-              })
-            );
+            const trailMaterial = new THREE.SpriteMaterial({
+              map: glowTexture,
+              color,
+              transparent: true,
+              opacity: trailOpacity(isActive) / trailIndex,
+              blending: THREE.AdditiveBlending,
+              depthWrite: false
+            });
+            const trail = new THREE.Sprite(trailMaterial);
             const trailSize = (isActive ? 4.9 : 3.2) / Math.sqrt(trailIndex);
             trail.scale.set(trailSize, trailSize, 1);
             trail.renderOrder = isActive ? 4 : 3;
@@ -1170,6 +1532,12 @@ export function NebulaGraph({
               trailing: trailIndex
             };
             particleGroup.add(trail);
+            focusVisuals.particles.push({
+              edge,
+              material: trailMaterial,
+              activeOpacity: trailOpacity(true) / trailIndex,
+              inactiveOpacity: 0.035 / trailIndex
+            });
           }
         }
       });
@@ -1432,22 +1800,27 @@ export function NebulaGraph({
           communityStarColors.push(starColor.r, starColor.g, starColor.b);
         }
 
-        if (isHoverActive || nodeIndex < 18 || (node.weight ?? 0) >= 98.6 || layout.length <= 36) {
+        if (isHoverActive || nodeIndex < 18 || (node.weight ?? 0) >= 98.6 || layout.length <= 160) {
           const labelTexture = makeCommunityLabelTexture(node.name, node.properties?.node_count);
+          const labelOpacity = hasSelection || hasPath ? 0.38 : hasHover ? (isHoverActive ? 0.92 : 0.18) : 0.72;
           const label = new THREE.Sprite(
             new THREE.SpriteMaterial({
               map: labelTexture,
               transparent: true,
-              opacity: hasSelection || hasPath ? 0.38 : hasHover ? (isHoverActive ? 0.92 : 0.18) : 0.72,
+              opacity: showLabelsRef.current ? labelOpacity : 0,
               depthTest: false,
               depthWrite: false
             })
           );
-          label.scale.set(66, 21, 1);
+          (label.material as THREE.SpriteMaterial).userData.baseOpacity = labelOpacity;
+          const labelAspect = labelTexture.image.width / labelTexture.image.height;
+          const labelHeight = 21;
+          label.scale.set(labelHeight * labelAspect, labelHeight, 1);
           label.position.copy(position).add(new THREE.Vector3(0, communityRadius * 0.82, 10));
           label.renderOrder = 10;
-          label.userData = { baseScale: 66, labelAspect: 3.14, phase: hashUnit(`${node.id}-label`) * Math.PI * 2 };
+          label.userData = { baseScale: labelHeight * labelAspect, labelAspect, phase: hashUnit(`${node.id}-label`) * Math.PI * 2 };
           nodeGroup.add(label);
+          labelSpritesRef.current.push(label);
         }
 
         return;
@@ -1505,6 +1878,7 @@ export function NebulaGraph({
         pulseAmp: communityNode ? 0.035 : 0.055
       };
       nodeGroup.add(starburst);
+      registerNodeSprite(node.id, starburst);
 
       const core = new THREE.Sprite(
         new THREE.SpriteMaterial({
@@ -1522,6 +1896,7 @@ export function NebulaGraph({
       core.renderOrder = 7;
       core.userData = { baseScale: radius * 1.86, phase: Math.random() * Math.PI * 2, pulseSpeed: communityNode ? 0.72 : 1.8, pulseAmp: communityNode ? 0.032 : 0.055 };
       nodeGroup.add(core);
+      registerNodeSprite(node.id, core);
 
       const hotCore = new THREE.Sprite(
         new THREE.SpriteMaterial({
@@ -1540,6 +1915,7 @@ export function NebulaGraph({
       hotCore.renderOrder = 8;
       hotCore.userData = { baseScale: hotCoreScale, phase: Math.random() * Math.PI * 2, pulseSpeed: communityNode ? 0.72 : 1.8, pulseAmp: communityNode ? 0.03 : 0.055 };
       nodeGroup.add(hotCore);
+      registerNodeSprite(node.id, hotCore);
 
       if (communityNode && (nodeIndex < 16 || (node.weight ?? 0) >= 98.8)) {
         for (let rippleIndex = 0; rippleIndex < 1; rippleIndex += 1) {
@@ -1569,25 +1945,38 @@ export function NebulaGraph({
         }
       }
 
-      const shouldShowLabel = hasPath
-        ? pathNodeIds.has(node.id)
-        : hasSelection && (largeGraph ? focusDetailIds.has(node.id) : activeIds.has(node.id));
+      const shouldShowLabel =
+        (hasPath
+          ? pathNodeIds.has(node.id)
+          : hasSelection
+            ? largeGraph
+              ? focusDetailIds.has(node.id)
+              : activeIds.has(node.id)
+            : layout.length <= 240
+              ? true
+              : (node.weight ?? 0) >= 86 || nodeIndex < 48);
       if (shouldShowLabel) {
         const labelTexture = makeNodeLabelTexture(node.name);
+        const labelAspect = labelTexture.image.width / labelTexture.image.height;
+        const labelHeight = 27;
+        const labelOpacity = node.id === selectedNodeId ? 0.98 : 0.82;
         const label = new THREE.Sprite(
           new THREE.SpriteMaterial({
             map: labelTexture,
             transparent: true,
-            opacity: node.id === selectedNodeId ? 0.98 : 0.82,
+            opacity: showLabelsRef.current ? labelOpacity : 0,
             depthTest: false,
             depthWrite: false
           })
         );
-        label.scale.set(82, 27, 1);
+        (label.material as THREE.SpriteMaterial).userData.baseOpacity = labelOpacity;
+        label.scale.set(labelHeight * labelAspect, labelHeight, 1);
         label.position.copy(mesh.position).add(new THREE.Vector3(0, radius * 2.35, 10));
         label.renderOrder = 10;
-        label.userData = { baseScale: 82, labelAspect: 3, phase: Math.random() * Math.PI * 2 };
-      nodeGroup.add(label);
+        label.userData = { baseScale: labelHeight * labelAspect, labelAspect, phase: Math.random() * Math.PI * 2 };
+        nodeGroup.add(label);
+        labelSpritesRef.current.push(label);
+        focusVisuals.labels.set(node.id, label);
       }
     });
 
@@ -1615,6 +2004,96 @@ export function NebulaGraph({
 
     addCommunityPointBatch(communityDustPositions, communityDustColors, hasHover ? 2.7 : 2.1, hasHover ? 0.48 : 0.34, 6);
     addCommunityPointBatch(communityStarPositions, communityStarColors, hasHover ? 3.7 : 2.8, hasSelection || hasPath ? 0.24 : hasHover ? 0.44 : 0.38, 7);
+
+    updateFocusVisualsRef.current = (selectedId?: string, focusedId?: string, path?: GraphPath) => {
+      const nextPathNodeIds = new Set(path?.nodes.map((node) => node.id) ?? []);
+      const nextPathEdgeKeys = edgeSignatureSet(path?.edges);
+      const nextActiveIds = neighborIds(data, selectedId, 1);
+      if (focusedId) nextActiveIds.add(focusedId);
+      if (selectedId) nextActiveIds.add(selectedId);
+      nextPathNodeIds.forEach((id) => nextActiveIds.add(id));
+      const hasNextPath = nextPathEdgeKeys.size > 0;
+      const hasNextFocus = Boolean(selectedId || focusedId || hasNextPath);
+
+      focusVisuals.nodes.forEach((sprites, nodeId) => {
+        const active = hasNextPath ? nextPathNodeIds.has(nodeId) : !hasNextFocus || nextActiveIds.has(nodeId);
+        sprites.forEach((sprite) => {
+          const material = sprite.material as THREE.SpriteMaterial;
+          material.userData.defaultOpacity ??= material.opacity;
+          const defaultOpacity = Number(material.userData.defaultOpacity);
+          const selectedBoost = nodeId === selectedId || nodeId === focusedId ? 1.18 : 1;
+          setMaterialOpacity(material, hasNextFocus ? (active ? Math.min(1, Math.max(defaultOpacity, 0.66) * selectedBoost) : 0.08) : defaultOpacity);
+        });
+      });
+
+      focusVisuals.edges.forEach((item) => {
+        const active = hasNextPath ? edgeMatchesSignatures(item.edge, nextPathEdgeKeys) : !hasNextFocus || edgeTouchesFocus(item.edge, selectedId, focusedId);
+        setMaterialOpacity(item.material, hasNextFocus ? (active ? item.activeOpacity : item.inactiveOpacity) : item.activeOpacity);
+        item.material.depthTest = !active;
+      });
+
+      focusVisuals.particles.forEach((item) => {
+        const active = hasNextPath ? edgeMatchesSignatures(item.edge, nextPathEdgeKeys) : !hasNextFocus || edgeTouchesFocus(item.edge, selectedId, focusedId);
+        setMaterialOpacity(item.material, hasNextFocus ? (active ? item.activeOpacity : item.inactiveOpacity) : item.activeOpacity);
+      });
+
+      focusVisuals.labels.forEach((label, nodeId) => {
+        const material = label.material as THREE.SpriteMaterial;
+        const baseOpacity = typeof material.userData.baseOpacity === 'number' ? material.userData.baseOpacity : material.opacity;
+        material.userData.baseOpacity = baseOpacity;
+        const active = hasNextPath ? nextPathNodeIds.has(nodeId) : !hasNextFocus || nextActiveIds.has(nodeId);
+        material.opacity = showLabelsRef.current && active ? (nodeId === selectedId || nodeId === focusedId ? 0.98 : baseOpacity) : 0;
+      });
+    };
+    updateFocusVisualsRef.current(selectedNodeId, focusedNodeId, highlightedPath);
+
+    if (isDrillEntry) {
+      const entryOrigin = transitionOrigin(commandAtMount.origin, initialFit?.center ?? new THREE.Vector3());
+      const fitNodes = commandAtMount.type === 'drill-in'
+        ? representativeDrillNodes(layout, data.edges)
+        : representativeOverviewNodes(layout, visibleEdges);
+      const finalFrame = computeBestViewFrame(
+        fitNodes,
+        communityView ? COMMUNITY_ROOT_ROTATION : DEFAULT_ROOT_ROTATION,
+        camera.aspect,
+        cameraFov,
+        root.scale.x,
+        {
+          mode: commandAtMount.type === 'drill-in' ? 'drill-view' : 'overview',
+          communityView,
+          nodeCount: layout.length,
+          baseRotation: communityView ? COMMUNITY_ROOT_ROTATION : DEFAULT_ROOT_ROTATION
+        }
+      );
+      [nodeGroup, edgeGroup, particleGroup, dustGroup, stars, dust].forEach(rememberBaseOpacity);
+      setObjectOpacityScale(nodeGroup, 0);
+      setObjectOpacityScale(edgeGroup, 0);
+      setObjectOpacityScale(particleGroup, 0);
+      setObjectOpacityScale(dustGroup, 0.18);
+      setObjectOpacityScale(stars, 0.16);
+      setObjectOpacityScale(dust, 0.12);
+      setGroupExpansion(nodeGroup, entryOrigin, commandAtMount.type === 'drill-out' ? 1.08 : 0.14);
+      setGroupExpansion(edgeGroup, entryOrigin, commandAtMount.type === 'drill-out' ? 1.03 : 0.24);
+      setGroupExpansion(particleGroup, entryOrigin, commandAtMount.type === 'drill-out' ? 1.03 : 0.24);
+      graphTransitionRef.current = {
+        active: true,
+        frameApplied: false,
+        startTime: performance.now(),
+        duration: DRILL_TRANSITION_DURATION,
+        origin: entryOrigin,
+        finalFrame,
+        nodeStartScale: nodeGroup.scale.x,
+        edgeStartScale: edgeGroup.scale.x,
+        nodeGroup,
+        edgeGroup,
+        particleGroup,
+        dustGroup,
+        stars,
+        backgroundDust: dust
+      };
+    } else {
+      graphTransitionRef.current = undefined;
+    }
 
     const raycaster = new THREE.Raycaster();
     raycaster.params.Points = { threshold: largeGraph ? 10 : 4 };
@@ -1645,6 +2124,7 @@ export function NebulaGraph({
     };
 
     const onPointerMove = (event: PointerEvent) => {
+      if (graphTransitionRef.current?.active) return;
       if (isDragging) {
         const dx = event.clientX - lastX;
         const dy = event.clientY - lastY;
@@ -1660,11 +2140,12 @@ export function NebulaGraph({
       if (hitNode?.id !== hovered?.id) {
         hovered = hitNode;
         renderer.domElement.style.cursor = hitNode ? 'pointer' : 'grab';
-        onHoverNode(hitNode);
+        onHoverNodeRef.current(hitNode);
       }
     };
 
     const onPointerDown = (event: PointerEvent) => {
+      if (graphTransitionRef.current?.active) return;
       if (focusTargetRef.current) {
         focusTargetRef.current.active = false;
       }
@@ -1675,14 +2156,16 @@ export function NebulaGraph({
       renderer.domElement.setPointerCapture(event.pointerId);
     };
     const onPointerUp = (event: PointerEvent) => {
+      if (graphTransitionRef.current?.active) return;
       isDragging = false;
       renderer.domElement.releasePointerCapture(event.pointerId);
       setPointer(event);
       const pickedNode = pickNodeAtPointer() ?? hovered;
-      if (pickedNode && dragDistance < 8) onSelectNode(pickedNode);
+      if (pickedNode && dragDistance < 8) onSelectNodeRef.current(pickedNode);
     };
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
+      if (graphTransitionRef.current?.active) return;
       if (focusTargetRef.current) {
         focusTargetRef.current.active = false;
       }
@@ -1710,27 +2193,22 @@ export function NebulaGraph({
             .filter((node): node is NodePosition => Boolean(node))
         : representativeOverviewNodes(layout, visibleEdges);
       const fit = hasPath
-        ? chooseBestFitView(fitNodes, root.rotation, camera.aspect, cameraFov, root.scale.x, {
-            padding: focusPadding(fitNodes.length),
-            minFrame: communityView ? 420 : 400,
-            minCameraZ: communityView ? 520 : 520,
-            maxCameraZ: communityView ? 1320 : MAX_CAMERA_Z,
-            preferDepth: 0.18,
-            rotationDamping: 9
+        ? computeBestViewFrame(fitNodes, root.rotation, camera.aspect, cameraFov, root.scale.x, {
+            mode: 'path',
+            communityView,
+            nodeCount: layout.length
           })
-        : chooseAutoFrameView(
+        : computeBestViewFrame(
               fitNodes,
               communityView ? COMMUNITY_ROOT_ROTATION : DEFAULT_ROOT_ROTATION,
               camera.aspect,
               cameraFov,
               root.scale.x,
               {
-                padding: overviewPadding(layout.length),
-                minFrame: communityView ? 400 : 360,
-                minCameraZ: communityView ? 520 : 500,
-                maxCameraZ: communityView ? 1380 : 1680,
-                preferDepth: communityView ? 0.16 : 0.11,
-                rotationDamping: 6
+                mode: 'overview',
+                communityView,
+                nodeCount: layout.length,
+                baseRotation: communityView ? COMMUNITY_ROOT_ROTATION : DEFAULT_ROOT_ROTATION
               }
             );
       focusTargetRef.current = {
@@ -1747,19 +2225,93 @@ export function NebulaGraph({
       const command = viewCommandRef.current;
       if (command && command.nonce !== handledCommandNonce) {
         handledCommandNonce = command.nonce;
-        if (command.type === 'zoom-in') {
+        if (command.type === 'drill-in') {
           if (focusTargetRef.current) focusTargetRef.current.active = false;
-          cameraTargetZ = THREE.MathUtils.clamp(cameraTargetZ * ZOOM_IN_FACTOR, MIN_CAMERA_Z, MAX_CAMERA_Z);
-        } else if (command.type === 'zoom-out') {
+        } else if (command.type === 'zoom-in') {
+          if (focusTargetRef.current) focusTargetRef.current.active = false;
+          const originNode = command.origin?.id ? nodeMap.get(command.origin.id) : undefined;
+          if (originNode) {
+            const focusFit = computeBestViewFrame([originNode], root.rotation, camera.aspect, cameraFov, root.scale.x, {
+              mode: 'drill',
+              communityView,
+              nodeCount: layout.length
+            });
+            focusTargetRef.current = {
+              id: `drill-preview-${command.nonce}`,
+              center: focusFit.center,
+              cameraZ: THREE.MathUtils.clamp(focusFit.cameraZ * 0.78, MIN_CAMERA_Z, MAX_CAMERA_Z),
+              rotation: focusFit.rotation,
+              active: true
+            };
+            cameraTargetZ = focusTargetRef.current.cameraZ;
+          } else {
+            cameraTargetZ = THREE.MathUtils.clamp(cameraTargetZ * ZOOM_IN_FACTOR, MIN_CAMERA_Z, MAX_CAMERA_Z);
+          }
+        } else if (command.type === 'zoom-out' || command.type === 'drill-out') {
           if (focusTargetRef.current) focusTargetRef.current.active = false;
           cameraTargetZ = THREE.MathUtils.clamp(cameraTargetZ * ZOOM_OUT_FACTOR, MIN_CAMERA_Z, MAX_CAMERA_Z);
         } else {
           fitCurrentView();
         }
       }
+      const graphTransition = graphTransitionRef.current;
+      if (graphTransition?.active) {
+        const elapsedMs = performance.now() - graphTransition.startTime;
+        const progress = clamp01(elapsedMs / graphTransition.duration);
+        const nodeProgress = easeOutCubic((elapsedMs - 80) / 700);
+        const edgeProgress = easeInOutCubic((elapsedMs - 420) / 620);
+        const particleProgress = easeInOutCubic((elapsedMs - 620) / 560);
+        const dustProgress = easeInOutCubic((elapsedMs - 40) / 760);
+        const nodeScale = THREE.MathUtils.lerp(graphTransition.nodeStartScale, 1, nodeProgress);
+        const edgeScale = THREE.MathUtils.lerp(graphTransition.edgeStartScale, 1, edgeProgress);
+
+        setGroupExpansion(graphTransition.nodeGroup, graphTransition.origin, nodeScale);
+        setGroupExpansion(graphTransition.edgeGroup, graphTransition.origin, edgeScale);
+        setGroupExpansion(graphTransition.particleGroup, graphTransition.origin, edgeScale);
+        setObjectOpacityScale(graphTransition.nodeGroup, nodeProgress);
+        setObjectOpacityScale(graphTransition.edgeGroup, edgeProgress);
+        setObjectOpacityScale(graphTransition.particleGroup, particleProgress);
+        setObjectOpacityScale(graphTransition.dustGroup, THREE.MathUtils.lerp(0.18, 1, dustProgress));
+        setObjectOpacityScale(graphTransition.stars, THREE.MathUtils.lerp(0.16, 1, dustProgress));
+        setObjectOpacityScale(graphTransition.backgroundDust, THREE.MathUtils.lerp(0.12, 1, dustProgress));
+
+        if (!graphTransition.frameApplied && graphTransition.finalFrame && elapsedMs >= 820) {
+          graphTransition.frameApplied = true;
+          focusTargetRef.current = {
+            id: `drill-final-${dataSignature}`,
+            center: graphTransition.finalFrame.center,
+            cameraZ: graphTransition.finalFrame.cameraZ,
+            rotation: graphTransition.finalFrame.rotation,
+            active: true
+          };
+          cameraTargetZ = graphTransition.finalFrame.cameraZ;
+        }
+
+        if (progress >= 1) {
+          graphTransition.active = false;
+          setGroupExpansion(graphTransition.nodeGroup, graphTransition.origin, 1);
+          setGroupExpansion(graphTransition.edgeGroup, graphTransition.origin, 1);
+          setGroupExpansion(graphTransition.particleGroup, graphTransition.origin, 1);
+          setObjectOpacityScale(graphTransition.nodeGroup, 1);
+          setObjectOpacityScale(graphTransition.edgeGroup, 1);
+          setObjectOpacityScale(graphTransition.particleGroup, 1);
+          setObjectOpacityScale(graphTransition.dustGroup, 1);
+          setObjectOpacityScale(graphTransition.stars, 1);
+          setObjectOpacityScale(graphTransition.backgroundDust, 1);
+        }
+      }
       stars.rotation.z += 0.00008;
       const backgroundDustOpacity = hasPath || hasSelection ? 0.04 : 0.08;
       (dust.material as THREE.PointsMaterial).opacity = backgroundDustOpacity * (1 + Math.sin(elapsed * 0.7) * 0.08);
+      darkVeil.children.forEach((child) => {
+        if (!('baseX' in child.userData)) return;
+        child.position.set(
+          child.userData.baseX + Math.sin(elapsed * 0.018 + child.userData.phase) * child.userData.drift,
+          child.userData.baseY + Math.cos(elapsed * 0.014 + child.userData.phase * 1.31) * child.userData.drift * 0.6,
+          child.userData.baseZ
+        );
+        child.rotation.z = child.userData.baseRotation + Math.sin(elapsed * 0.012 + child.userData.phase) * 0.012 + elapsed * child.userData.rotationSpeed;
+      });
       animateCosmicDust(cosmicDust, performance.now() * 0.001);
       point.intensity = 2.2 + Math.sin(elapsed * 1.5) * 0.25;
       particleGroup.children.forEach((sprite) => {
@@ -1829,19 +2381,28 @@ export function NebulaGraph({
     animate();
 
     return () => {
-      viewStateRef.current = {
-        rootPosition: root.position.clone(),
-        rootRotation: root.rotation.clone(),
-        rootScale: root.scale.x,
-        cameraZ: camera.position.z,
-        dataSignature
-      };
+      if (layout.length > 0 && !graphTransitionRef.current?.active) {
+        viewStateRef.current = {
+          rootPosition: root.position.clone(),
+          rootRotation: root.rotation.clone(),
+          rootScale: root.scale.x,
+          cameraZ: camera.position.z,
+          dataSignature
+        };
+      }
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
       renderer.domElement.removeEventListener('pointermove', onPointerMove);
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);
       renderer.domElement.removeEventListener('pointerup', onPointerUp);
       renderer.domElement.removeEventListener('wheel', onWheel);
+      if (updateFocusVisualsRef.current) updateFocusVisualsRef.current = undefined;
+      const cleanupCommand = viewCommandRef.current;
+      if (cleanupCommand?.type === 'drill-in' || cleanupCommand?.type === 'drill-out') {
+        fadeOutRetainedCanvas(mount, renderer);
+        if (runtimeRef.current?.root === root) runtimeRef.current = undefined;
+        return;
+      }
       renderer.dispose();
       if (runtimeRef.current?.root === root) runtimeRef.current = undefined;
       mount.removeChild(renderer.domElement);
@@ -1850,15 +2411,10 @@ export function NebulaGraph({
     data,
     dataSignature,
     communityView,
-    focusedNodeId,
     highlightedPath,
     layout,
     minWeight,
     nodeTierIndex,
-    onCanvasReady,
-    onHoverNode,
-    onSelectNode,
-    selectedNodeId,
     visibleRelations
   ]);
 
